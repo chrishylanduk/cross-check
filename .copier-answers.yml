@@ -1,0 +1,10 @@
+# Changes here will be overwritten by Copier
+_commit: 0.1.0
+_src_path: https://github.com/chrishylanduk/data-science-copier.git
+author_name: Chris Hyland
+libraries: []
+license: MIT
+project_description: Automatically recommend improvements to a large collection of
+    written content (e.g. a website or intranet) to improve its consistency, clarity,
+    compliance and completeness. Save hours or days compared to a manual content audit.
+project_name: cross_check

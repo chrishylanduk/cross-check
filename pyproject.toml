@@ -1,0 +1,27 @@
+[project]
+name = "cross_check"
+version = "0.0.1"
+description = "Automatically recommend improvements to a large collection of written content (e.g. a website or intranet) to improve its consistency, clarity, compliance and completeness. Save hours or days compared to a manual content audit."
+readme = "README.md"
+requires-python = ">=3.13"
+authors = [
+    {name = "Chris Hyland"},
+]
+
+license = {text = "MIT"}
+
+dependencies = [
+
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.1.0",
+    "ruff>=0.9.2",
+    "pytest",
+    "itables",
+    "pip-audit",
+    "pipask",
+    "jupyter",
+    "ipykernel",
+]
