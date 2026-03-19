@@ -889,3 +889,8 @@ docs/_linkcheck/
 *.csv
 *.xls
 *.xlsx
+
+# Next.js
+frontend/.next/
+frontend/out/
+frontend/.env*.local

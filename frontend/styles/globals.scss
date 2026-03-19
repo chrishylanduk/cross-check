@@ -1,0 +1,53 @@
+/* Import GOV.UK Frontend base styles (official recommended method) */
+@import "node_modules/govuk-frontend/dist/govuk/index";
+
+/* Override font to not use Transport (not a real gov.uk service) */
+:root {
+  --govuk-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+.govuk-template {
+  font-family: var(--govuk-font-family);
+}
+
+/* Remove crown logo (not a real gov.uk service) */
+.govuk-header__logotype-crown,
+.govuk-footer__crown {
+  display: none !important;
+}
+
+/* Custom product name styling to match GOV.UK logo */
+.govuk-header__product-name {
+  display: inline-block;
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1;
+  color: #ffffff;
+}
+
+.govuk-header__link--homepage:link {
+  color: #ffffff !important;
+  text-decoration: none !important;
+}
+
+.govuk-header__link--homepage:visited {
+  color: #ffffff !important;
+  text-decoration: none !important;
+}
+
+.govuk-header__link--homepage:hover {
+  color: #ffffff !important;
+  text-decoration: underline !important;
+  text-decoration-thickness: 3px !important;
+  text-underline-offset: .1578em !important;
+}
+
+.govuk-header__link--homepage:hover .govuk-header__product-name {
+  text-decoration: underline !important;
+  text-decoration-thickness: 3px !important;
+  text-underline-offset: .1578em !important;
+}
+
+.govuk-header__link--homepage:focus {
+  color: #0b0c0c !important;
+}

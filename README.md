@@ -1,40 +1,62 @@
-# `{{ project_name }}`
+# Cross-check
 
-{{ project_description }}
+Automatically recommend improvements to a large collection of written content (e.g. a website or intranet) to improve its consistency, clarity, compliance and completeness. Save hours or days compared to a manual content audit.
+
+## Tech Stack
+
+- **Frontend**: Next.js (Pages Router) with GOV.UK Frontend styling
+- **Backend**: FastAPI (Python)
+- **Styling**: govuk-frontend components (without crown/Transport font)
 
 ## Getting started
 
-To start using this project, [first make sure your system meets its
-requirements](#requirements).
+### Requirements
 
-It's suggested that you install this pack and its requirements within a virtual environment.
+- Python 3.13+ installed
+- Node.js 18+ and npm installed
+- a `.env` file with the [required environment variables](#required-environment-variables)
 
-## Installing the package
+### Installing dependencies
 
-Whilst in the root folder, in the command prompt, you can install the package and its dependencies using:
+Install both frontend and backend dependencies:
 
 ```shell
+make install
+```
+
+Or install them separately:
+
+```shell
+# Python backend dependencies
 uv sync
+
+# Frontend dependencies
+cd frontend && npm install
 ```
 
-This installs an editable version of the package. Meaning, when you update the
-package code, you do not have to reinstall it for the changes to take effect.
-(This saves a lot of time when you test your code)
+## Running the development servers
 
-Remember to update the pyproject.toml file inline with any changes to your
-package dependencies. The initial files contain the bare minimum to get you started.
+You need to run both the frontend and backend servers. Open two terminal windows:
 
-## Running the pipeline
-
-The entry point for the pipeline is stored within the package and called `run_pipeline.py`.
-To run the pipeline, run the following code in the terminal (whilst in the root directory of the
-project).
-
+**Terminal 1 - Backend (FastAPI)**:
 ```shell
-uv run python src/{{ project_name }}/run_pipeline.py
+make dev-backend
 ```
+The API will be available at http://localhost:8000
 
-Alternatively, most Python IDEs allow you to run the code directly from the IDE using a `run` button.
+**Terminal 2 - Frontend (Next.js)**:
+```shell
+make dev-frontend
+```
+The app will be available at http://localhost:3000
+
+### Available make commands
+
+Run `make help` to see all available commands:
+- `make install` - Install all dependencies
+- `make dev-frontend` - Run Next.js frontend
+- `make dev-backend` - Run FastAPI backend
+- `make clean` - Clean build artifacts
 
 ## Required environment variables
 
