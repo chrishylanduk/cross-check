@@ -60,20 +60,68 @@ Run `make help` to see all available commands:
 
 ## Required environment variables
 
-To run this project, you need a `.env` file with environment variables and secrets.
-Copy `.env.example` to `.env` and fill in your actual values:
+To run this project, you need a `.env` file with environment variables.
+Copy `.env.example` to `.env` and customise as needed:
 
 ```shell
 cp .env.example .env
 ```
 
-For example:
+Key variables:
 
-| Variable | Description                                |
-|----------|--------------------------------------------|
-| `API_KEY` | Your API key for external services |
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `PROTOTYPE_PASSWORD` | Password to access the app | - | Yes* |
+| `DISABLE_PROTOTYPE_PASSWORD` | Set to `true` to disable password | - | No |
+| `CORS_ORIGINS` | Comma-separated allowed origins | `http://localhost:3000` | No |
+| `NEXT_PUBLIC_API_BASE` | Backend API URL | `http://localhost:8000` | No |
+| `PORT` | Backend server port | `8000` | No |
+
+*Either `PROTOTYPE_PASSWORD` must be set, or `DISABLE_PROTOTYPE_PASSWORD=true`
 
 The `.env` file is ignored by git for security.
+
+## Docker Deployment
+
+This project uses hardened Chainguard base images for security.
+
+### Build and run with Docker Compose
+
+```shell
+docker compose up --build
+```
+
+The application will be available at:
+- Frontend: http://localhost:3000
+- Backend API: http://localhost:8000
+
+### Platform Deployment (Railway, etc.)
+
+When deploying to platforms like Railway:
+
+1. **Backend service**:
+   - Set `CORS_ORIGINS` to your frontend URL(s)
+   - Platform will set `PORT` automatically
+   - Set `PERSISTENT_STORAGE_WARNING_DISABLED=true`
+
+2. **Frontend service**:
+   - Set `NEXT_PUBLIC_API_BASE` to your backend service URL
+
+3. **Storage**:
+   - Files are stored on ephemeral disk (free on Railway, 100GB limit)
+   - Sessions expire after 1 hour, files are cleaned up automatically
+   - Orphaned files (from server restarts) are cleaned up on startup
+   - No persistent volumes needed for this use case
+
+### Build individual containers
+
+```shell
+# Backend
+docker build -f Dockerfile.backend -t cross-check-backend .
+
+# Frontend
+docker build -f frontend/Dockerfile -t cross-check-frontend ./frontend
+```
 
 
 ### Requirements
