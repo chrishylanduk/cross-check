@@ -894,3 +894,6 @@ docs/_linkcheck/
 frontend/.next/
 frontend/out/
 frontend/.env*.local
+frontend/tsconfig.tsbuildinfo
+
+data/*

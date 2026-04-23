@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# Data and caches
+data/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+docs/
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Frontend (excluded from backend build)
+frontend/
+node_modules/

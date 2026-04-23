@@ -1,9 +1,87 @@
 /* Import GOV.UK Frontend base styles (official recommended method) */
-@import "node_modules/govuk-frontend/dist/govuk/index";
+@use "node_modules/govuk-frontend/dist/govuk/index" as *;
 
 /* Override font to not use Transport (not a real gov.uk service) */
 :root {
   --govuk-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* Override color scheme - change from gov.uk blue to orange */
+.govuk-header {
+  background-color: #f47738 !important;
+  border-bottom-color: #d96520 !important;
+}
+
+.govuk-button {
+  background-color: #f47738 !important;
+  box-shadow: 0 2px 0 #d96520 !important;
+  color: #ffffff !important;
+}
+
+.govuk-button:hover {
+  background-color: #e6692e !important;
+  color: #ffffff !important;
+}
+
+.govuk-button:active {
+  background-color: #d96520 !important;
+  box-shadow: 0 0 0 #d96520 !important;
+  color: #ffffff !important;
+  top: 2px;
+}
+
+.govuk-button--secondary {
+  background-color: #f0f0f0 !important;
+  box-shadow: 0 2px 0 #929191 !important;
+  color: #0b0c0c !important;
+}
+
+.govuk-button--secondary:hover {
+  background-color: #dbdad9 !important;
+  color: #0b0c0c !important;
+}
+
+.govuk-button--secondary:active {
+  background-color: #929191 !important;
+  box-shadow: 0 0 0 #929191 !important;
+  color: #0b0c0c !important;
+  top: 2px;
+}
+
+.govuk-button--warning {
+  background-color: #d4351c !important;
+  box-shadow: 0 2px 0 #942514 !important;
+  color: #ffffff !important;
+}
+
+.govuk-button--warning:hover {
+  background-color: #aa2a16 !important;
+  color: #ffffff !important;
+}
+
+.govuk-button--warning:active {
+  background-color: #942514 !important;
+  box-shadow: 0 0 0 #942514 !important;
+  color: #ffffff !important;
+  top: 2px;
+}
+
+.govuk-link:link,
+.govuk-link:visited {
+  color: #d96520 !important;
+}
+
+.govuk-link:hover {
+  color: #b85318 !important;
+}
+
+.govuk-link:active,
+.govuk-link:focus {
+  color: #0b0c0c !important;
+}
+
+.govuk-footer {
+  border-top: 10px solid #f47738 !important;
 }
 
 .govuk-template {
