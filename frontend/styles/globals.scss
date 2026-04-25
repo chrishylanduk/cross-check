@@ -84,8 +84,36 @@
   border-top: 10px solid #f47738 !important;
 }
 
+/* Passage markdown: inherit govuk-body-s sizing, tighten internal spacing */
+.passage-markdown p {
+  margin-top: 0;
+  margin-bottom: 0.5em;
+  font-size: inherit;
+}
+
+.passage-markdown p:last-child {
+  margin-bottom: 0;
+}
+
+.passage-markdown a {
+  word-break: break-all;
+}
+
 .govuk-template {
   font-family: var(--govuk-font-family);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.govuk-template__body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.govuk-width-container {
+  flex: 1;
 }
 
 /* Remove crown logo (not a real gov.uk service) */

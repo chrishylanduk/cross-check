@@ -81,14 +81,19 @@ export default function FileList({
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            className="govuk-button govuk-button--warning"
-            data-module="govuk-button"
-            onClick={onClear}
-          >
-            Start again with new files
-          </button>
+          <div className="govuk-button-group">
+            <a href="/analyse" className="govuk-button">
+              Continue to analysis
+            </a>
+            <button
+              type="button"
+              className="govuk-button govuk-button--warning"
+              data-module="govuk-button"
+              onClick={onClear}
+            >
+              Start again with new files
+            </button>
+          </div>
         </>
       )}
 
