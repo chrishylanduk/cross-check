@@ -20,7 +20,24 @@ dependencies = [
     "pathvalidate>=3.2.0",
     "slowapi>=0.1.9",
     "python-dotenv>=1.2.2",
+    "pydantic-ai>=0.0.1",
+    "bertopic>=0.16.0",
+    "sentence-transformers>=3.0.0",
+    "arize-phoenix>=4.0.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.20.0",
+    "openinference-instrumentation-openai>=0.1.45",
 ]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ty.environment]
+extra-paths = ["src"]
 
 [dependency-groups]
 dev = [

@@ -1,7 +1,49 @@
+import { useEffect } from 'react'
 import Head from 'next/head'
+import { useRouter } from 'next/router'
 import Layout from '@/components/Layout'
 
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000'
+
+function clearSession() {
+  sessionStorage.removeItem('cross-check-session-id')
+  sessionStorage.removeItem('cross-check-expires-at')
+  sessionStorage.removeItem('cross-check-has-files')
+  sessionStorage.removeItem('cross-check-finalised')
+  sessionStorage.removeItem('cross-check-job-id')
+}
+
 export default function Home() {
+  const router = useRouter()
+
+  useEffect(() => {
+    const sessionId = sessionStorage.getItem('cross-check-session-id')
+    const hasFiles = sessionStorage.getItem('cross-check-has-files') === 'true'
+    if (!sessionId || !hasFiles) return
+
+    const authToken = sessionStorage.getItem('prototype-auth-token')
+    fetch(`${API_BASE}/api/collection`, {
+      headers: {
+        'X-Session-ID': sessionId,
+        ...(authToken ? { 'X-Prototype-Auth': authToken } : {}),
+      },
+    }).then(async (res) => {
+      if (!res.ok) {
+        clearSession()
+        return
+      }
+      const data = await res.json()
+      if (!data.file_count) {
+        clearSession()
+        return
+      }
+      const finalised = sessionStorage.getItem('cross-check-finalised') === 'true'
+      router.replace(finalised ? '/analyse' : '/upload')
+    }).catch(() => {
+      // Network error — don't redirect, leave user on landing page
+    })
+  }, [router])
+
   return (
     <Layout>
       <Head>

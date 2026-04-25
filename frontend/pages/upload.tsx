@@ -180,6 +180,9 @@ export default function Upload() {
         // Drop the old session so the init effect creates a fresh one
         sessionStorage.removeItem('cross-check-session-id')
         sessionStorage.removeItem('cross-check-expires-at')
+        sessionStorage.removeItem('cross-check-finalised')
+        sessionStorage.removeItem('cross-check-has-files')
+        sessionStorage.removeItem('cross-check-job-id')
         initialisingRef.current = false
         setSessionId(null)
         setExpiresAt(null)
@@ -197,8 +200,15 @@ export default function Upload() {
         })
 
         if (response.ok) {
+          sessionStorage.removeItem('cross-check-session-id')
+          sessionStorage.removeItem('cross-check-expires-at')
+          sessionStorage.removeItem('cross-check-has-files')
+          sessionStorage.removeItem('cross-check-job-id')
+          initialisingRef.current = false
+          setSessionId(null)
+          setExpiresAt(null)
+          setStorageInfo(null)
           setSuccess('All files deleted')
-          await fetchStorageInfo(sessionId as string)
           setTimeout(() => setSuccess(null), 3000)
         } else {
           const data = await response.json()
@@ -222,6 +232,7 @@ export default function Upload() {
       })
 
       if (response.ok) {
+        sessionStorage.setItem('cross-check-finalised', 'true')
         router.push('/analyse')
       } else {
         const data = await response.json()
@@ -290,6 +301,7 @@ export default function Upload() {
       }
 
       if (result.file_count > 0) {
+        sessionStorage.setItem('cross-check-has-files', 'true')
         setSuccess(
           `${result.file_count} file${result.file_count !== 1 ? 's' : ''} uploaded successfully`,
         )

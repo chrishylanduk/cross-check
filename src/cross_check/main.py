@@ -17,6 +17,8 @@ from typing import Dict, List, Optional
 import aiofiles
 import filetype
 from dotenv import load_dotenv
+from openinference.instrumentation.openai import OpenAIInstrumentor
+from phoenix.otel import register as phoenix_register
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -26,6 +28,16 @@ from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+
+from .analysis import (
+    Chunk,
+    InconsistencyResult,
+    TopicInfo,
+    check_topic_inconsistencies,
+    chunk_documents,
+    embed_chunks,
+    run_topic_model,
+)
 
 # Load environment variables from .env file (for local development)
 load_dotenv()
@@ -58,10 +70,25 @@ PROTOTYPE_PASSWORD_HASH = (
 # Initialise rate limiter
 limiter = Limiter(key_func=get_remote_address)
 
+PHOENIX_ENDPOINT = os.getenv("PHOENIX_ENDPOINT", "")
+
+
+def _configure_tracing() -> None:
+    """Set up OpenTelemetry export to Arize Phoenix (if PHOENIX_ENDPOINT is set)."""
+    if not PHOENIX_ENDPOINT:
+        return
+    tracer_provider = phoenix_register(
+        project_name="cross-check",
+        endpoint=f"{PHOENIX_ENDPOINT}/v1/traces",
+    )
+    OpenAIInstrumentor().instrument(tracer_provider=tracer_provider)
+    logger.info(f"OpenTelemetry tracing → {PHOENIX_ENDPOINT}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Restore persisted sessions, clean up expired ones, and start background cleanup."""
+    _configure_tracing()
     logger.info("=" * 60)
     logger.info("Cross-check API starting")
     logger.info(
@@ -212,6 +239,20 @@ async def session_cleanup_loop():
             sessions.pop(sid, None)
         if expired:
             logger.info(f"Cleanup loop: evicted {len(expired)} expired session(s)")
+
+        # Remove analysis jobs older than 24 hours
+        expired_jobs = [
+            jid
+            for jid, job in list(analysis_jobs.items())
+            if now - job["created_at"] > SESSION_TIMEOUT
+        ]
+        for jid in expired_jobs:
+            analysis_jobs.pop(jid, None)
+        if expired_jobs:
+            logger.info(
+                f"Cleanup loop: evicted {len(expired_jobs)} expired analysis job(s)"
+            )
+
         cleanup_orphaned_files()
 
 
@@ -243,6 +284,9 @@ ALLOWED_MIME_TYPES = {
 
 # In-memory session store (ephemeral)
 sessions: Dict[str, dict] = {}
+
+# In-memory analysis job store (ephemeral — jobs are not persisted across restarts)
+analysis_jobs: Dict[str, dict] = {}
 
 # Initialise MarkItDown converter
 md_converter = MarkItDown()
@@ -825,3 +869,153 @@ async def finalise_collection(
         "finalised": True,
         "file_count": file_count,
     }
+
+
+# ---------------------------------------------------------------------------
+# Analysis endpoints
+# ---------------------------------------------------------------------------
+
+
+async def _run_topic_discovery(job_id: str, session_id: str) -> None:
+    """Background task: chunk documents, embed, and run BERTopic."""
+    try:
+        session_dir = DATA_DIR / session_id
+        chunks = chunk_documents(session_dir)
+        embeddings = embed_chunks(chunks)
+        topics = run_topic_model(chunks, embeddings)
+
+        # Serialise topics into the job state (store chunk_indices to retrieve later)
+        analysis_jobs[job_id]["topics"] = [
+            {**t.model_dump(), "check_status": None, "result": None} for t in topics
+        ]
+        analysis_jobs[job_id]["chunks"] = [c.model_dump() for c in chunks]
+        analysis_jobs[job_id]["status"] = "topics_ready"
+        logger.info(
+            f"Topic discovery complete for job {job_id[:8]}...: {len(topics)} topics"
+        )
+    except Exception as exc:
+        logger.exception(f"Topic discovery failed for job {job_id[:8]}...")
+        analysis_jobs[job_id]["status"] = "error"
+        analysis_jobs[job_id]["error"] = str(exc)
+
+
+async def _run_topic_check(job_id: str, topic_id: int) -> None:
+    """Background task: run LLM inconsistency check for a single topic."""
+    try:
+        job = analysis_jobs[job_id]
+        topic = TopicInfo(**next(t for t in job["topics"] if t["id"] == topic_id))
+        chunks_raw = job["chunks"]
+
+        all_chunks = [Chunk(**c) for c in chunks_raw]
+        result: InconsistencyResult = await check_topic_inconsistencies(
+            topic, all_chunks
+        )
+
+        for t in job["topics"]:
+            if t["id"] == topic_id:
+                t["check_status"] = "complete"
+                t["result"] = result.model_dump()
+                break
+
+        logger.info(
+            f"Topic check complete for job {job_id[:8]}... topic {topic_id}: "
+            f"{'issues found' if result.has_inconsistencies else 'no issues'}"
+        )
+    except Exception as exc:
+        logger.exception(f"Topic check failed for job {job_id[:8]}... topic {topic_id}")
+        for t in analysis_jobs[job_id]["topics"]:
+            if t["id"] == topic_id:
+                t["check_status"] = "error"
+                t["error"] = str(exc)
+                break
+
+
+@app.post("/api/analysis/inconsistencies")
+@limiter.limit("5/minute")
+async def start_inconsistency_analysis(
+    request: Request,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+) -> dict:
+    """Start an inconsistency analysis job for a finalised collection."""
+    validate_session(x_session_id, request)
+
+    session = sessions[x_session_id]
+    if not session.get("finalised"):
+        raise HTTPException(
+            status_code=400, detail="Collection must be finalised before analysis"
+        )
+
+    job_id = secrets.token_urlsafe(16)
+    analysis_jobs[job_id] = {
+        "session_id": x_session_id,
+        "status": "discovering",
+        "topics": [],
+        "chunks": [],
+        "created_at": time.time(),
+        "error": None,
+    }
+
+    asyncio.create_task(_run_topic_discovery(job_id, x_session_id))
+    logger.info(
+        f"Analysis job {job_id[:8]}... started for session {x_session_id[:8]}..."
+    )
+    return {"job_id": job_id}
+
+
+@app.get("/api/analysis/{job_id}")
+@limiter.limit("30/minute")
+async def get_analysis_job(
+    request: Request,
+    job_id: str,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+) -> dict:
+    """Poll the status and results of an analysis job."""
+    validate_session(x_session_id, request)
+
+    job = analysis_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Analysis job not found")
+    if job["session_id"] != x_session_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Strip chunk_indices (internal index) from the response; keep topic_chunks
+    topics_out = []
+    for t in job["topics"]:
+        topics_out.append({k: v for k, v in t.items() if k != "chunk_indices"})
+
+    return {
+        "status": job["status"],
+        "topics": topics_out,
+        "error": job["error"],
+    }
+
+
+@app.post("/api/analysis/{job_id}/topics/{topic_id}/check")
+@limiter.limit("20/minute")
+async def check_topic(
+    request: Request,
+    job_id: str,
+    topic_id: int,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+) -> dict:
+    """Trigger an LLM inconsistency check for a specific topic in an analysis job."""
+    validate_session(x_session_id, request)
+
+    job = analysis_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Analysis job not found")
+    if job["session_id"] != x_session_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if job["status"] != "topics_ready":
+        raise HTTPException(status_code=400, detail="Topics not yet ready")
+
+    topic = next((t for t in job["topics"] if t["id"] == topic_id), None)
+    if topic is None:
+        raise HTTPException(status_code=404, detail="Topic not found")
+    if topic.get("check_status") in ("checking", "complete"):
+        return {"message": "Already checking or complete"}
+
+    topic["check_status"] = "checking"
+    asyncio.create_task(_run_topic_check(job_id, topic_id))
+    logger.info(f"Topic check triggered: job {job_id[:8]}... topic {topic_id}")
+    return {"message": "Check started"}
