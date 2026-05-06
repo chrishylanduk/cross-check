@@ -312,6 +312,8 @@ def run_topic_model(chunks: list[Chunk], embeddings: np.ndarray) -> list[TopicIn
                 continue
             matched_chunks = [chunks[i] for i in idx_group]
             docs = sorted({c.source_file for c in matched_chunks})
+            if len(docs) < 2:
+                continue
 
             # Re-derive label for sub-groups; fall back to parent label
             if len(final_groups) > 1:
@@ -344,6 +346,8 @@ def run_topic_model(chunks: list[Chunk], embeddings: np.ndarray) -> list[TopicIn
 
 def _single_topic_fallback(chunks: list[Chunk]) -> list[TopicInfo]:
     docs = sorted({c.source_file for c in chunks})
+    if len(docs) < 2:
+        return []
     return [
         TopicInfo(
             id=0,

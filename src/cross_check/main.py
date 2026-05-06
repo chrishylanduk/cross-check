@@ -2,12 +2,12 @@
 
 import asyncio
 import hashlib
-import json
 import logging
 import mimetypes
 import os
 import re
 import secrets
+import sqlite3
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -19,7 +19,7 @@ import filetype
 from dotenv import load_dotenv
 from openinference.instrumentation.openai import OpenAIInstrumentor
 from phoenix.otel import register as phoenix_register
-from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from markitdown import MarkItDown
@@ -87,8 +87,9 @@ def _configure_tracing() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Restore persisted sessions, clean up expired ones, and start background cleanup."""
+    """Initialise DB, clean up expired sessions, and start background cleanup."""
     _configure_tracing()
+    _init_db()
     logger.info("=" * 60)
     logger.info("Cross-check API starting")
     logger.info(
@@ -97,37 +98,23 @@ async def lifespan(app: FastAPI):
     logger.info(f"CORS allowed origins: {', '.join(CORS_ORIGINS)}")
     logger.info(f"Session timeout: {SESSION_TIMEOUT}s ({SESSION_TIMEOUT // 3600}h)")
     logger.info(f"Data directory: {DATA_DIR}")
+    logger.info(f"Database: {DB_PATH}")
     logger.info(f"Max file size: {MAX_FILE_SIZE / 1024 / 1024:.0f}MB")
     logger.info(
         f"Max storage per session: {MAX_STORAGE_PER_SESSION / 1024 / 1024:.0f}MB"
     )
 
-    # Restore sessions that haven't expired yet
+    # Evict sessions that expired while the server was offline
     now = time.time()
-    restored = 0
-    for session_dir in DATA_DIR.iterdir():
-        if not session_dir.is_dir():
-            continue
-        sid = session_dir.name
-        if not SESSION_ID_RE.match(sid):
-            logger.warning(
-                f"Skipping directory with unexpected name on restore: {sid[:20]!r}"
-            )
-            continue
-        data = load_session_json(session_dir)
-        if data is None:
-            logger.warning(f"Skipping {sid[:8]}...: missing or invalid session.json")
-            continue
-        if now - data["created_at"] > SESSION_TIMEOUT:
-            continue  # Expired — cleanup loop will remove it
-        sessions[sid] = {
-            "created_at": data["created_at"],
-            "finalised": data["finalised"],
-        }
-        restored += 1
-    logger.info(f"Restored {restored} active session(s) from disk")
+    expired_ids = _db_get_expired_session_ids(now - SESSION_TIMEOUT)
+    for sid in expired_ids:
+        cleanup_session_files(sid)
+    if expired_ids:
+        logger.info(f"Evicted {len(expired_ids)} session(s) that expired at rest")
 
-    # Remove anything already past expiry
+    active = _db_count_sessions()
+    logger.info(f"Active sessions: {active}")
+
     cleanup_orphaned_files()
 
     # Start background eviction loop
@@ -170,7 +157,7 @@ async def prototype_password_middleware(request: Request, call_next):
 
     # Check for valid auth token in header
     auth_token = request.headers.get("X-Prototype-Auth")
-    if auth_token and auth_token == PROTOTYPE_PASSWORD_HASH:
+    if auth_token and PROTOTYPE_PASSWORD_HASH and auth_token == PROTOTYPE_PASSWORD_HASH:
         return await call_next(request)
 
     # Unauthorized
@@ -228,15 +215,10 @@ async def session_cleanup_loop():
     while True:
         await asyncio.sleep(300)
         now = time.time()
-        expired = [
-            sid
-            for sid, session in list(sessions.items())
-            if now - session["created_at"] > SESSION_TIMEOUT
-        ]
+        expired = _db_get_expired_session_ids(now - SESSION_TIMEOUT)
         for sid in expired:
             logger.info(f"Cleanup loop: evicting expired session {sid[:8]}...")
             cleanup_session_files(sid)
-            sessions.pop(sid, None)
         if expired:
             logger.info(f"Cleanup loop: evicted {len(expired)} expired session(s)")
 
@@ -258,8 +240,87 @@ async def session_cleanup_loop():
 
 # Data directory for collections (ephemeral disk storage)
 # Project root = src/cross_check/main.py -> ../../.. = project root
-DATA_DIR = Path(__file__).parent.parent.parent / "data" / "collections"
+_DATA_ROOT = Path(__file__).parent.parent.parent / "data"
+DATA_DIR = _DATA_ROOT / "collections"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# SQLite database for session metadata
+DB_PATH = _DATA_ROOT / "sessions.db"
+
+
+def _db_conn() -> sqlite3.Connection:
+    """Return a new SQLite connection with safe defaults."""
+    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def _init_db() -> None:
+    """Create the sessions table if it does not exist."""
+    with _db_conn() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id TEXT PRIMARY KEY
+                    CHECK(length(session_id) = 43),
+                created_at REAL NOT NULL
+                    CHECK(created_at > 0),
+                finalised INTEGER NOT NULL DEFAULT 0
+                    CHECK(finalised IN (0, 1))
+            )
+        """)
+
+
+def _db_create_session(session_id: str, created_at: float) -> None:
+    with _db_conn() as conn:
+        conn.execute(
+            "INSERT INTO sessions (session_id, created_at, finalised) VALUES (?, ?, 0)",
+            (session_id, created_at),
+        )
+
+
+def _db_get_session(session_id: str) -> Optional[dict]:
+    """Return session dict or None if not found."""
+    with _db_conn() as conn:
+        row = conn.execute(
+            "SELECT created_at, finalised FROM sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {"created_at": float(row["created_at"]), "finalised": bool(row["finalised"])}
+
+
+def _db_set_finalised(session_id: str) -> None:
+    with _db_conn() as conn:
+        conn.execute(
+            "UPDATE sessions SET finalised = 1 WHERE session_id = ?",
+            (session_id,),
+        )
+
+
+def _db_delete_session(session_id: str) -> None:
+    with _db_conn() as conn:
+        conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+
+
+def _db_get_expired_session_ids(before: float) -> List[str]:
+    """Return session IDs whose created_at is before the given timestamp."""
+    with _db_conn() as conn:
+        rows = conn.execute(
+            "SELECT session_id FROM sessions WHERE created_at < ?",
+            (before,),
+        ).fetchall()
+    return [row["session_id"] for row in rows]
+
+
+def _db_count_sessions() -> int:
+    with _db_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
+    return row[0] if row else 0
+
 
 # Security constants
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB per file
@@ -282,9 +343,6 @@ ALLOWED_MIME_TYPES = {
     "text/markdown",
 }
 
-# In-memory session store (ephemeral)
-sessions: Dict[str, dict] = {}
-
 # In-memory analysis job store (ephemeral — jobs are not persisted across restarts)
 analysis_jobs: Dict[str, dict] = {}
 
@@ -292,57 +350,37 @@ analysis_jobs: Dict[str, dict] = {}
 md_converter = MarkItDown()
 
 
-def write_session_json(session_id: str, session: dict) -> None:
-    """Persist session metadata to disk so restarts don't lose active sessions."""
-    json_path = DATA_DIR / session_id / "session.json"
-    try:
-        with open(json_path, "w") as f:
-            json.dump(
-                {
-                    "created_at": session["created_at"],
-                    "finalised": session["finalised"],
-                },
-                f,
-            )
-    except Exception as e:
-        logger.error(f"Failed to write session.json for {session_id[:8]}...: {e}")
+MAX_FOOTER_CUTOFF_LENGTH = 500
 
 
-def load_session_json(session_dir: Path) -> Optional[dict]:
-    """
-    Load and validate session metadata from disk.
-    Returns None if the file is missing, malformed, or contains invalid values.
-    """
-    try:
-        with open(session_dir / "session.json") as f:
-            data = json.load(f)
-        created_at = data.get("created_at")
-        finalised = data.get("finalised", False)
-        # Reject if types are wrong
-        if not isinstance(created_at, (int, float)) or not isinstance(finalised, bool):
-            return None
-        now = time.time()
-        # Reject future timestamps (tampered) or impossibly old ones (> 30× timeout)
-        if created_at > now or created_at < now - SESSION_TIMEOUT * 30:
-            return None
-        return {"created_at": float(created_at), "finalised": finalised}
-    except (OSError, json.JSONDecodeError, TypeError):
-        return None
+def _strip_before_first_h1(content: str) -> str:
+    """Remove all content before the first markdown H1 heading."""
+    for i, line in enumerate(content.split("\n")):
+        if line.startswith("# "):
+            return "\n".join(content.split("\n")[i:]).lstrip("\n")
+    return content
+
+
+def _strip_after_last_occurrence(content: str, marker: str) -> str:
+    """Remove everything from the last occurrence of marker onwards (inclusive)."""
+    pos = content.rfind(marker)
+    if pos == -1:
+        return content
+    return content[:pos].rstrip("\n")
 
 
 def create_session() -> str:
-    """Create a new session, persist metadata to disk, and return the session ID."""
+    """Create a new session, persist to SQLite, and return the session ID."""
     session_id = secrets.token_urlsafe(32)
-    session = {"created_at": time.time(), "finalised": False}
-    sessions[session_id] = session
+    created_at = time.time()
     session_dir = DATA_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
-    write_session_json(session_id, session)
+    _db_create_session(session_id, created_at)
     return session_id
 
 
 def validate_session(session_id: str, request: Request | None = None) -> None:
-    """Validate session exists and has not passed its fixed 24-hour expiry."""
+    """Validate session exists in the DB and has not passed its 24-hour expiry."""
     client_ip = get_remote_address(request) if request else "unknown"
 
     if not session_id:
@@ -351,25 +389,29 @@ def validate_session(session_id: str, request: Request | None = None) -> None:
         )
         raise HTTPException(status_code=401, detail="Session ID required")
 
-    if session_id not in sessions:
+    if not SESSION_ID_RE.match(session_id):
+        logger.warning(f"Session validation failed: malformed ID | Client: {client_ip}")
+        raise HTTPException(status_code=401, detail="Invalid session ID")
+
+    session = _db_get_session(session_id)
+    if session is None:
         logger.warning(
             f"Session validation failed: unknown ID {session_id[:8]}... | Client: {client_ip}"
         )
         raise HTTPException(status_code=401, detail="Invalid session ID")
 
-    session = sessions[session_id]
     age = time.time() - session["created_at"]
     if age > SESSION_TIMEOUT:
         logger.info(f"Session expired: {session_id[:8]}... (age {int(age)}s)")
         cleanup_session_files(session_id)
-        sessions.pop(session_id, None)
         raise HTTPException(status_code=401, detail="Session expired")
 
     logger.debug(f"Session validated: {session_id[:8]}...")
 
 
 def cleanup_session_files(session_id: str) -> None:
-    """Delete all files and the directory for a session."""
+    """Delete the session row from SQLite and all files on disk."""
+    _db_delete_session(session_id)
     session_dir = DATA_DIR / session_id
     if session_dir.exists():
         try:
@@ -382,7 +424,7 @@ def cleanup_session_files(session_id: str) -> None:
 
 
 def cleanup_orphaned_files() -> None:
-    """Remove session directories that have no in-memory session and have passed expiry."""
+    """Remove session directories that have no DB entry or have passed expiry."""
     if not DATA_DIR.exists():
         return
 
@@ -390,23 +432,24 @@ def cleanup_orphaned_files() -> None:
     cleaned_count = 0
 
     for session_dir in DATA_DIR.iterdir():
-        if not session_dir.is_dir() or session_dir.name in sessions:
+        if not session_dir.is_dir():
             continue
-        # Use created_at from session.json; fall back to directory mtime
-        data = load_session_json(session_dir)
-        age = now - (data["created_at"] if data else session_dir.stat().st_mtime)
-        if age <= SESSION_TIMEOUT:
+        sid = session_dir.name
+        if not SESSION_ID_RE.match(sid):
             continue
+        session = _db_get_session(sid)
+        # Skip directories that belong to an active, unexpired session
+        if session is not None and now - session["created_at"] <= SESSION_TIMEOUT:
+            continue
+        age = now - (session["created_at"] if session else session_dir.stat().st_mtime)
         try:
             for file in session_dir.iterdir():
                 file.unlink()
             session_dir.rmdir()
             cleaned_count += 1
-            logger.info(
-                f"Removed expired orphan: {session_dir.name[:8]}... (age {int(age)}s)"
-            )
+            logger.info(f"Removed expired orphan: {sid[:8]}... (age {int(age)}s)")
         except Exception as e:
-            logger.error(f"Failed to cleanup orphan {session_dir.name[:8]}...: {e}")
+            logger.error(f"Failed to cleanup orphan {sid[:8]}...: {e}")
 
     if cleaned_count:
         logger.info(f"Orphan cleanup: removed {cleaned_count} directory/ies")
@@ -420,7 +463,7 @@ def get_session_storage_usage(session_id: str) -> int:
     total = 0
     try:
         for file in session_dir.iterdir():
-            if file.is_file() and file.name != "session.json":
+            if file.is_file():
                 total += file.stat().st_size
     except Exception as e:
         logger.error(f"Error calculating storage for session {session_id[:8]}...: {e}")
@@ -485,9 +528,11 @@ async def create_session_endpoint(request: Request):
     logger.info(
         f"Session created: {session_id[:8]}... | "
         f"Client: {client_ip} | Origin: {origin} | "
-        f"Total active sessions: {len(sessions)}"
+        f"Total active sessions: {_db_count_sessions()}"
     )
-    expires_at = sessions[session_id]["created_at"] + SESSION_TIMEOUT
+    session = _db_get_session(session_id)
+    assert session is not None
+    expires_at = session["created_at"] + SESSION_TIMEOUT
     return {
         "session_id": session_id,
         "expires_at": expires_at,
@@ -500,6 +545,8 @@ async def upload_files(
     request: Request,
     files: List[UploadFile] = File(...),
     x_session_id: str = Header(..., alias="X-Session-ID"),
+    strip_before_h1: bool = Form(False),
+    footer_cutoff: str = Form(""),
 ):
     """Upload content files to user's collection."""
     client_ip = get_remote_address(request)
@@ -511,10 +558,10 @@ async def upload_files(
     # Validate session
     validate_session(x_session_id, request)
 
-    session = sessions[x_session_id]
+    session = _db_get_session(x_session_id)
 
     # Check if collection is finalised
-    if session.get("finalised", False):
+    if session and session["finalised"]:
         raise HTTPException(
             status_code=400,
             detail="Collection is finalised. Cannot upload more files. Start a new session to create a different collection.",
@@ -522,6 +569,14 @@ async def upload_files(
 
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
+
+    # Validate processing options
+    footer_cutoff = footer_cutoff.strip()
+    if len(footer_cutoff) > MAX_FOOTER_CUTOFF_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Footer cutoff text must be {MAX_FOOTER_CUTOFF_LENGTH} characters or fewer",
+        )
 
     # Limit number of files per upload
     if len(files) > MAX_FILES_PER_UPLOAD:
@@ -629,6 +684,21 @@ async def upload_files(
                 if not markdown_content or not markdown_content.strip():
                     raise ValueError("Conversion resulted in empty content")
 
+                # Apply HTML-specific post-processing
+                if mime_type == "text/html":
+                    if strip_before_h1:
+                        markdown_content = _strip_before_first_h1(markdown_content)
+                    if footer_cutoff:
+                        markdown_content = _strip_after_last_occurrence(
+                            markdown_content, footer_cutoff
+                        )
+
+                # Re-validate after processing (options could strip all content)
+                if not markdown_content or not markdown_content.strip():
+                    raise ValueError(
+                        "Processing options removed all content from the file"
+                    )
+
             except Exception as conv_error:
                 raise HTTPException(
                     status_code=422,
@@ -636,7 +706,7 @@ async def upload_files(
                 )
 
             # Save as markdown to disk
-            md_filename = Path(safe_filename).stem + ".md"
+            md_filename = safe_filename + ".md"
             md_path = session_dir / md_filename
 
             async with aiofiles.open(md_path, "w", encoding="utf-8") as f:
@@ -682,7 +752,7 @@ async def get_collection(
     # Validate session
     validate_session(x_session_id, request)
 
-    session = sessions[x_session_id]
+    session = _db_get_session(x_session_id)
     session_dir = DATA_DIR / x_session_id
 
     if not session_dir.exists():
@@ -690,7 +760,7 @@ async def get_collection(
             "files": [],
             "file_count": 0,
             "storage_used": 0,
-            "finalised": session.get("finalised", False),
+            "finalised": session["finalised"] if session else False,
         }
 
     files = []
@@ -698,11 +768,7 @@ async def get_collection(
 
     try:
         for file_path in session_dir.iterdir():
-            if (
-                file_path.is_file()
-                and not file_path.name.startswith("temp_")
-                and file_path.name != "session.json"
-            ):
+            if file_path.is_file() and not file_path.name.startswith("temp_"):
                 size = file_path.stat().st_size
                 files.append(
                     {
@@ -721,8 +787,46 @@ async def get_collection(
         "file_count": len(files),
         "storage_used": total_size,
         "storage_limit": MAX_STORAGE_PER_SESSION,
-        "finalised": session.get("finalised", False),
+        "finalised": session["finalised"] if session else False,
     }
+
+
+@app.get("/api/collection/{filename}")
+@limiter.limit("60/minute")
+async def get_file_content(
+    request: Request,
+    filename: str,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+):
+    """Return the markdown content of a specific file in the collection."""
+    validate_session(x_session_id, request)
+
+    safe_filename = sanitize_filename(filename)
+    if not safe_filename or safe_filename != filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    if not safe_filename.endswith(".md"):
+        raise HTTPException(
+            status_code=400, detail="Only markdown files can be retrieved"
+        )
+
+    session_dir = DATA_DIR / x_session_id
+    file_path = session_dir / safe_filename
+
+    # Prevent path traversal
+    try:
+        file_path.resolve().relative_to(session_dir.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if file_path.stat().st_size > MAX_FILE_SIZE:
+        raise HTTPException(status_code=400, detail="File too large to display")
+
+    content = file_path.read_text(encoding="utf-8")
+    return Response(content=content, media_type="text/plain; charset=utf-8")
 
 
 @app.delete("/api/collection/{filename}")
@@ -741,10 +845,10 @@ async def delete_file(
     # Validate session
     validate_session(x_session_id, request)
 
-    session = sessions[x_session_id]
+    session = _db_get_session(x_session_id)
 
     # Check if collection is finalised
-    if session.get("finalised", False):
+    if session and session["finalised"]:
         raise HTTPException(
             status_code=400,
             detail="Collection is finalised. Cannot delete files. Start a new session to upload different files.",
@@ -784,10 +888,10 @@ async def clear_collection(
     # Validate session
     validate_session(x_session_id, request)
 
-    session = sessions[x_session_id]
+    session = _db_get_session(x_session_id)
 
     # Check if collection is finalised
-    if session.get("finalised", False):
+    if session and session["finalised"]:
         raise HTTPException(
             status_code=400,
             detail="Collection is finalised. Cannot clear files. Start a new session instead.",
@@ -801,11 +905,7 @@ async def clear_collection(
     deleted_count = 0
     try:
         for file_path in session_dir.iterdir():
-            if (
-                file_path.is_file()
-                and not file_path.name.startswith("temp_")
-                and file_path.name != "session.json"
-            ):
+            if file_path.is_file() and not file_path.name.startswith("temp_"):
                 file_path.unlink()
                 deleted_count += 1
 
@@ -834,10 +934,10 @@ async def finalise_collection(
     # Validate session
     validate_session(x_session_id, request)
 
-    session = sessions[x_session_id]
+    session = _db_get_session(x_session_id)
 
     # Check if already finalised
-    if session.get("finalised", False):
+    if session and session["finalised"]:
         return {"message": "Collection already finalised", "finalised": True}
 
     # Check if collection has files
@@ -847,9 +947,7 @@ async def finalise_collection(
         file_count = sum(
             1
             for f in session_dir.iterdir()
-            if f.is_file()
-            and not f.name.startswith("temp_")
-            and f.name != "session.json"
+            if f.is_file() and not f.name.startswith("temp_")
         )
 
     if file_count == 0:
@@ -857,9 +955,8 @@ async def finalise_collection(
             status_code=400, detail="Cannot finalise an empty collection"
         )
 
-    # Mark as finalised in memory and on disk
-    session["finalised"] = True
-    write_session_json(x_session_id, session)
+    # Mark as finalised in SQLite
+    _db_set_finalised(x_session_id)
     logger.info(
         f"Collection finalised | Session: {x_session_id[:8]}... | Files: {file_count}"
     )
@@ -939,8 +1036,8 @@ async def start_inconsistency_analysis(
     """Start an inconsistency analysis job for a finalised collection."""
     validate_session(x_session_id, request)
 
-    session = sessions[x_session_id]
-    if not session.get("finalised"):
+    session = _db_get_session(x_session_id)
+    if not session or not session["finalised"]:
         raise HTTPException(
             status_code=400, detail="Collection must be finalised before analysis"
         )

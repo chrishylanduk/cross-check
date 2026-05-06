@@ -116,6 +116,10 @@
   flex: 1;
 }
 
+.govuk-footer {
+  margin-top: auto;
+}
+
 /* Remove crown logo (not a real gov.uk service) */
 .govuk-header__logotype-crown,
 .govuk-footer__crown {

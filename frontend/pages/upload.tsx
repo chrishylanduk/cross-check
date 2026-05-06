@@ -4,6 +4,7 @@ import { useRouter } from 'next/router'
 import Layout from '@/components/Layout'
 import DataUsageNotice from '@/components/DataUsageNotice'
 import FileList from '@/components/FileList'
+import MarkdownViewModal from '@/components/MarkdownViewModal'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000'
 const MAX_FILE_SIZE = 50 * 1024 * 1024 // 50MB
@@ -37,6 +38,12 @@ export default function Upload() {
   const [rejectedFiles, setRejectedFiles] = useState<RejectedFile[]>([])
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null)
   const [dataUsageAccepted, setDataUsageAccepted] = useState(false)
+  const [modalFilename, setModalFilename] = useState<string | null>(null)
+  const [modalContent, setModalContent] = useState<string | null>(null)
+  const [modalLoading, setModalLoading] = useState(false)
+  const [modalError, setModalError] = useState<string | null>(null)
+  const [stripBeforeH1, setStripBeforeH1] = useState(false)
+  const [footerCutoff, setFooterCutoff] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
   const initialisingRef = useRef<boolean>(false)
@@ -243,6 +250,40 @@ export default function Upload() {
     }
   }
 
+  const handleViewFile = async (filename: string) => {
+    setModalFilename(filename)
+    setModalContent(null)
+    setModalError(null)
+    setModalLoading(true)
+
+    try {
+      const authToken = sessionStorage.getItem('prototype-auth-token')
+      const response = await fetch(`${API_BASE}/api/collection/${encodeURIComponent(filename)}`, {
+        headers: {
+          'X-Session-ID': sessionId as string,
+          ...(authToken && { 'X-Prototype-Auth': authToken }),
+        },
+      })
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data.detail || 'Could not load file content')
+      }
+
+      setModalContent(await response.text())
+    } catch (err) {
+      setModalError((err as Error).message || 'Could not load file content')
+    } finally {
+      setModalLoading(false)
+    }
+  }
+
+  const handleCloseModal = () => {
+    setModalFilename(null)
+    setModalContent(null)
+    setModalError(null)
+  }
+
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = Array.from(e.target.files ?? [])
 
@@ -272,6 +313,8 @@ export default function Upload() {
       selectedFiles.forEach((file) => {
         formData.append('files', file)
       })
+      formData.append('strip_before_h1', stripBeforeH1 ? 'true' : 'false')
+      formData.append('footer_cutoff', footerCutoff.trim())
 
       const authToken = sessionStorage.getItem('prototype-auth-token')
       const response = await fetch(`${API_BASE}/api/upload`, {
@@ -405,6 +448,86 @@ export default function Upload() {
 
                   <h2 className="govuk-heading-m">Add files</h2>
 
+                  <details className="govuk-details">
+                    <summary className="govuk-details__summary">
+                      <span className="govuk-details__summary-text">
+                        How your files are processed
+                      </span>
+                    </summary>
+                    <div className="govuk-details__text">
+                      <p className="govuk-body">
+                        When you upload a file, it is automatically converted to plain text
+                        (Markdown format). Only this plain text is stored and analysed — your
+                        original file is not kept.
+                      </p>
+                      <p className="govuk-body">
+                        You can view the converted text for any uploaded file using the{' '}
+                        <strong>View</strong> link in the file list.
+                      </p>
+                    </div>
+                  </details>
+
+                  <details className="govuk-details">
+                    <summary className="govuk-details__summary">
+                      <span className="govuk-details__summary-text">
+                        HTML processing options
+                      </span>
+                    </summary>
+                    <div className="govuk-details__text">
+                      <p className="govuk-body-s">
+                        These options apply to HTML files only.
+                      </p>
+
+                      <div className="govuk-form-group">
+                        <div
+                          className="govuk-checkboxes govuk-checkboxes--small"
+                          data-module="govuk-checkboxes"
+                        >
+                          <div className="govuk-checkboxes__item">
+                            <input
+                              className="govuk-checkboxes__input"
+                              id="strip-before-h1"
+                              type="checkbox"
+                              checked={stripBeforeH1}
+                              onChange={(e) => setStripBeforeH1(e.target.checked)}
+                            />
+                            <label
+                              className="govuk-label govuk-checkboxes__label"
+                              htmlFor="strip-before-h1"
+                            >
+                              Remove everything before the first heading
+                            </label>
+                            <div className="govuk-hint govuk-checkboxes__hint">
+                              Useful for stripping site navigation and banners from the top
+                              of a page.
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="govuk-form-group">
+                        <label className="govuk-label" htmlFor="footer-cutoff">
+                          Remove from last occurrence of
+                        </label>
+                        <div className="govuk-hint" id="footer-cutoff-hint">
+                          Everything including and after the last occurrence of this text will
+                          be removed. Leave blank to keep all content. Useful for excluding
+                          repeated footer content.
+                        </div>
+                        <input
+                          className="govuk-input"
+                          id="footer-cutoff"
+                          type="text"
+                          value={footerCutoff}
+                          onChange={(e) => setFooterCutoff(e.target.value)}
+                          maxLength={500}
+                          aria-describedby="footer-cutoff-hint"
+                          spellCheck={false}
+                        />
+                      </div>
+                    </div>
+                  </details>
+
                   <div className="govuk-form-group">
                     <label className="govuk-label" htmlFor="file-upload">
                       Upload files
@@ -474,11 +597,22 @@ export default function Upload() {
               <FileList
                 files={storageInfo?.files || []}
                 onDelete={handleDeleteFile}
+                onViewFile={handleViewFile}
                 onClear={handleClearAll}
                 onFinalize={handleFinalise}
                 finalised={storageInfo?.finalised || false}
                 formatBytes={formatBytes}
               />
+
+              {modalFilename && (
+                <MarkdownViewModal
+                  filename={modalFilename}
+                  content={modalContent}
+                  loading={modalLoading}
+                  error={modalError}
+                  onClose={handleCloseModal}
+                />
+              )}
             </>
           )}
         </div>
