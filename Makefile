@@ -1,4 +1,4 @@
-.PHONY: help install dev dev-frontend dev-backend clean
+.PHONY: help install dev dev-frontend dev-backend dev-phoenix clean
 
 help:
 	@echo "Cross-check - AI-assisted content audit tool"
@@ -8,6 +8,7 @@ help:
 	@echo "  make dev          - Run both frontend and backend (in separate terminals)"
 	@echo "  make dev-frontend - Run Next.js frontend on http://localhost:3000"
 	@echo "  make dev-backend  - Run FastAPI backend on http://localhost:8000"
+	@echo "  make dev-phoenix  - Run Arize Phoenix UI on http://localhost:6006"
 	@echo "  make clean        - Clean build artifacts"
 
 install:
@@ -23,10 +24,14 @@ dev-frontend:
 dev-backend:
 	uv run uvicorn src.cross_check.main:app --reload --port 8000
 
+dev-phoenix:
+	uv run phoenix serve
+
 dev:
 	@echo "Run these commands in separate terminals:"
 	@echo "  Terminal 1: make dev-backend"
 	@echo "  Terminal 2: make dev-frontend"
+	@echo "  Terminal 3: make dev-phoenix"
 
 clean:
 	rm -rf frontend/node_modules frontend/.next

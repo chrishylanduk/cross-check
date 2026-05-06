@@ -6,6 +6,7 @@ interface FileItem {
 interface FileListProps {
   files: FileItem[]
   onDelete: (filename: string) => void
+  onViewFile: (filename: string) => void
   onClear: () => void
   onFinalize: () => void
   finalised: boolean
@@ -15,6 +16,7 @@ interface FileListProps {
 export default function FileList({
   files,
   onDelete,
+  onViewFile,
   onClear,
   onFinalize,
   finalised,
@@ -106,11 +108,9 @@ export default function FileList({
             <th scope="col" className="govuk-table__header govuk-table__header--numeric">
               Size
             </th>
-            {!finalised && (
-              <th scope="col" className="govuk-table__header govuk-table__header--numeric">
-                Action
-              </th>
-            )}
+            <th scope="col" className="govuk-table__header govuk-table__header--numeric">
+              Actions
+            </th>
           </tr>
         </thead>
         <tbody className="govuk-table__body">
@@ -120,18 +120,29 @@ export default function FileList({
               <td className="govuk-table__cell govuk-table__cell--numeric">
                 {formatBytes(file.size)}
               </td>
-              {!finalised && (
-                <td className="govuk-table__cell govuk-table__cell--numeric">
-                  <button
-                    type="button"
-                    className="govuk-link"
-                    onClick={() => onDelete(file.name)}
-                    style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#d4351c' }}
-                  >
-                    Delete
-                  </button>
-                </td>
-              )}
+              <td className="govuk-table__cell govuk-table__cell--numeric">
+                <button
+                  type="button"
+                  className="govuk-link"
+                  onClick={() => onViewFile(file.name)}
+                  style={{ border: 'none', background: 'none', cursor: 'pointer' }}
+                >
+                  View<span className="govuk-visually-hidden"> {file.name}</span>
+                </button>
+                {!finalised && (
+                  <>
+                    {' '}
+                    <button
+                      type="button"
+                      className="govuk-link"
+                      onClick={() => onDelete(file.name)}
+                      style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#d4351c' }}
+                    >
+                      Delete<span className="govuk-visually-hidden"> {file.name}</span>
+                    </button>
+                  </>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>
