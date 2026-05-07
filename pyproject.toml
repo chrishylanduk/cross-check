@@ -39,6 +39,10 @@ where = ["src"]
 [tool.ty.environment]
 extra-paths = ["src"]
 
+[tool.bandit]
+targets = ["src"]
+skips = ["B101"]  # assert statements are acceptable in non-test code here
+
 [dependency-groups]
 dev = [
     "pre-commit>=4.1.0",

@@ -58,6 +58,14 @@ repos:
         name: detect-secrets - Detect secrets in staged code
         exclude: .*/tests/.*|^\.cruft\.json$
 
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.8.3
+    hooks:
+      - id: bandit
+        name: bandit - Python security linter
+        args: ["-c", "pyproject.toml", "--severity-level", "medium"]
+        types: [python]
+
   - repo: local
     hooks:
       - id: typescript
