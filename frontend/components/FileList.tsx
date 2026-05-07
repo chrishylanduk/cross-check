@@ -1,3 +1,4 @@
+import Link from 'next/link'
 import { displayFilename } from '@/lib/filename'
 
 interface FileItem {
@@ -86,9 +87,9 @@ export default function FileList({
             </div>
           </div>
           <div className="govuk-button-group">
-            <a href="/analyse" className="govuk-button">
+            <Link href="/analyse" className="govuk-button">
               Continue to analysis
-            </a>
+            </Link>
             <button
               type="button"
               className="govuk-button govuk-button--warning"

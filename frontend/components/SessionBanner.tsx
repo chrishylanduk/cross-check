@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/router'
 import { usePolling } from '@/hooks/usePolling'
 
@@ -29,6 +30,7 @@ export default function SessionBanner() {
       if (issues) {
         setSession((prev) => prev ? { ...prev, issueCount: sumIssues(issues.modules) } : prev)
       }
+      // eslint-disable-next-line react-hooks/immutability
       schedule(() => pollIssues(headers))
     } catch {
       // Silently ignore poll failures
@@ -104,13 +106,13 @@ export default function SessionBanner() {
       <div className="govuk-width-container">
         <div className="govuk-body-s" style={{ margin: 0, display: 'flex', gap: '24px', alignItems: 'center' }}>
           <span>Expires {formatExpiry(session.expiresAt)}</span>
-          <a href="/upload" className="govuk-link govuk-link--no-visited-state">
+          <Link href="/upload" className="govuk-link govuk-link--no-visited-state">
             View files ({session.fileCount})
-          </a>
+          </Link>
           {finalised && (
-            <a href="/issues" className="govuk-link govuk-link--no-visited-state">
+            <Link href="/issues" className="govuk-link govuk-link--no-visited-state">
               View issues ({session.issueCount ?? 0})
-            </a>
+            </Link>
           )}
           <button type="button" onClick={handleStartAgain} className="govuk-link govuk-link--no-visited-state" style={linkStyle}>
             Start again

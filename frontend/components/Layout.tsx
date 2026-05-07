@@ -1,3 +1,4 @@
+import Link from 'next/link'
 import { ReactNode } from 'react'
 import SessionBanner from '@/components/SessionBanner'
 
@@ -21,9 +22,9 @@ export default function Layout({
       <header className="govuk-header" role="banner" data-module="govuk-header">
         <div className="govuk-header__container govuk-width-container">
           <div className="govuk-header__logo">
-            <a href="/" className="govuk-header__link govuk-header__link--homepage">
+            <Link href="/" className="govuk-header__link govuk-header__link--homepage">
               <span className="govuk-header__product-name">{serviceName}</span>
-            </a>
+            </Link>
           </div>
         </div>
       </header>
