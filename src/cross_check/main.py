@@ -11,6 +11,7 @@ import secrets
 import sqlite3
 import sys
 import time
+import urllib.parse
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -63,12 +64,14 @@ if PROTOTYPE_PASSWORD_ENABLED and not PROTOTYPE_PASSWORD:
     )
     sys.exit(1)
 
-# Generate a secret token for password validation
+# Hash used only for password verification — never exposed externally
 PROTOTYPE_PASSWORD_HASH = (
     hashlib.sha256(PROTOTYPE_PASSWORD.encode()).hexdigest()
     if PROTOTYPE_PASSWORD
     else None
 )
+# Random tokens issued on successful auth — separate from the password hash
+VALID_AUTH_TOKENS: set[str] = set()
 
 # Initialise rate limiter
 limiter = Limiter(key_func=get_remote_address)
@@ -179,7 +182,7 @@ async def prototype_password_middleware(request: Request, call_next):
 
     # Check for valid auth token in header
     auth_token = request.headers.get("X-Prototype-Auth")
-    if auth_token and PROTOTYPE_PASSWORD_HASH and auth_token == PROTOTYPE_PASSWORD_HASH:
+    if auth_token and auth_token in VALID_AUTH_TOKENS:
         return await call_next(request)
 
     # Unauthorized
@@ -464,7 +467,14 @@ def _extract_og_url(html_bytes: bytes) -> str | None:
         html,
         re.IGNORECASE,
     )
-    return match.group(1).strip() if match else None
+    if not match:
+        return None
+    url = match.group(1).strip()
+    # Only allow http/https to prevent javascript: and data: URI XSS
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return None
+    return url
 
 
 def create_session() -> str:
@@ -600,9 +610,11 @@ async def validate_password(
         logger.info(
             f"Successful prototype password validation from {get_remote_address(request)}"
         )
+        auth_token = secrets.token_urlsafe(32)
+        VALID_AUTH_TOKENS.add(auth_token)
         return {
             "valid": True,
-            "token": PROTOTYPE_PASSWORD_HASH,
+            "token": auth_token,
             "message": "Password valid",
         }
 
