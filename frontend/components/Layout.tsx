@@ -13,7 +13,7 @@ export default function Layout({
   showSessionBanner = false,
 }: LayoutProps) {
   return (
-    <>
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
       <a href="#main-content" className="govuk-skip-link" data-module="govuk-skip-link">
         Skip to main content
       </a>
@@ -30,6 +30,7 @@ export default function Layout({
 
       {showSessionBanner && <SessionBanner />}
 
+      <div style={{ flex: 1 }}>
       <div className="govuk-width-container">
         <div className="govuk-phase-banner">
           <p className="govuk-phase-banner__content">
@@ -41,6 +42,7 @@ export default function Layout({
         <main className="govuk-main-wrapper" id="main-content" role="main">
           {children}
         </main>
+      </div>
       </div>
 
       <footer className="govuk-footer" role="contentinfo">
@@ -76,6 +78,6 @@ export default function Layout({
           </div>
         </div>
       </footer>
-    </>
+    </div>
   )
 }

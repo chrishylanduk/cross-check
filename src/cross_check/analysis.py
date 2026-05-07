@@ -5,11 +5,11 @@ import os
 import re
 from pathlib import Path
 
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 from bertopic import BERTopic
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import CountVectorizer
@@ -46,10 +46,10 @@ class RelevantPassage(BaseModel):
 
 
 class Inconsistency(BaseModel):
-    type: str  # "contradiction" or "uneven_coverage"
+    type: Literal["contradiction", "uneven_coverage"]
     description: str
-    documents_involved: list[str]
-    relevant_passages: list[RelevantPassage]
+    documents_involved: list[str] = Field(min_length=2)
+    relevant_passages: list[RelevantPassage] = Field(min_length=2)
 
 
 class InconsistencyResult(BaseModel):
@@ -373,11 +373,27 @@ documents for inconsistencies. Your bar for reporting should be high — only \
 flag things that would genuinely mislead or confuse a reader.
 
 Definitions:
-- Contradiction: Document A explicitly states X, Document B explicitly states \
-  Y, and X and Y conflict on the same factual claim.
+- Contradiction: Document A and Document B both address the SAME specific \
+  service, scenario, or factual question, and they give directly conflicting \
+  answers — i.e. both cannot be correct at the same time.
 - Uneven coverage: Document A contains substantive information on a point that \
   Document B omits AND does not link to — leaving a reader of Document B \
   without something they genuinely need.
+
+Do NOT flag as a contradiction:
+- Parallel documents that serve different purposes or cover different services, \
+  even if their wording for a shared process (e.g. data use, complaints, \
+  appeals) differs. Each document is correctly describing its own service. \
+  Different purposes for third-party data, different contact channels, or \
+  different procedural steps are expected when the underlying services differ.
+- Privacy notices, terms and conditions, or policy statements that are adapted \
+  per service — variation in how boilerplate is applied to different contexts \
+  is intentional, not contradictory.
+- Wording differences that reflect the same policy applied to a different \
+  subject (e.g. "to assess your entitlement to X" vs "to perform the Y \
+  service" — both accurately describe their own service).
+- Differences in contact details, URLs, or email addresses across documents \
+  for different services or teams.
 
 Do NOT flag as uneven coverage:
 - A document that is intentionally high-level, introductory, or a summary — \
@@ -402,6 +418,9 @@ Respond only with valid JSON matching the requested structure.\
 _inconsistency_agent: Any = None
 
 
+ANALYSIS_TIMEOUT = float(os.getenv("ANALYSIS_TIMEOUT", "30"))
+
+
 def _get_agent() -> Any:
     global _inconsistency_agent
     if _inconsistency_agent is None:
@@ -409,6 +428,7 @@ def _get_agent() -> Any:
             ANALYSIS_MODEL,
             output_type=InconsistencyResult,
             system_prompt=_SYSTEM_PROMPT,
+            model_settings={"timeout": ANALYSIS_TIMEOUT},
         )
     return _inconsistency_agent
 
@@ -444,12 +464,18 @@ They come from {len(by_doc)} different documents in the same content collection.
 
 Look for genuine inconsistencies between these documents. Before reporting \
 anything, ask yourself:
-- For contradictions: do both documents make an explicit, conflicting claim \
-  about the same fact?
+- For contradictions: are both documents covering the exact same service or \
+  scenario? Do they give directly conflicting answers that cannot both be \
+  correct? Or are the differences simply because each document accurately \
+  describes its own distinct service or context?
 - For uneven coverage: does the document that omits the information also fail \
   to link to it? Is the omitting document the kind of page where a reader \
   would reasonably expect to find this detail (not a summary, form, or \
   high-level overview)? Would a reader be materially misled without it?
+
+If the documents are parallel pages for different services and the differences \
+reflect their different purposes, do not flag them — that is correct variation, \
+not an inconsistency.
 
 If the answer to any of these questions is no, do not flag it.
 
@@ -458,8 +484,16 @@ inconsistencies (array). Each inconsistency should have: type \
 ("contradiction" or "uneven_coverage"), description (one clear sentence \
 naming which documents differ and how), documents_involved (list of \
 filenames), and relevant_passages (list of objects with document and passage \
-fields quoting the relevant text). Return an empty array if nothing clearly \
-meets the bar.\
+fields quoting the relevant text).
+
+For relevant_passages, you MUST include at least one passage from every \
+document listed in documents_involved. For uneven coverage, quote the most \
+relevant passage from the document that is missing the information — even if \
+that passage only shows the surrounding context where the information is \
+absent. Do not list a document in documents_involved if you cannot quote a \
+passage from it.
+
+Return an empty array if nothing clearly meets the bar.\
 """
 
     agent = _get_agent()

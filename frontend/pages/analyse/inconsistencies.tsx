@@ -167,7 +167,19 @@ function TopicRow({
             </button>
           )}
           {topic.check_status === 'error' && (
-            <span className="govuk-error-message govuk-body-s">Check failed</span>
+            <div>
+              <span className="govuk-error-message govuk-body-s" style={{ display: 'block', marginBottom: '4px' }}>
+                Check failed
+              </span>
+              <button
+                type="button"
+                className="govuk-button govuk-button--secondary"
+                style={{ marginBottom: 0 }}
+                onClick={() => onCheck(topic.id)}
+              >
+                Retry
+              </button>
+            </div>
           )}
         </td>
       </tr>
@@ -227,73 +239,66 @@ function TopicRow({
 }
 
 export default function Inconsistencies() {
-  const [jobId, setJobId] = useState<string | null>(null)
   const [job, setJob] = useState<JobState | null>(null)
   const [startError, setStartError] = useState<string | null>(null)
   const startedRef = useRef(false)
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const pollJob = useCallback(
-    async (id: string) => {
-      try {
-        const res = await fetch(`${API_BASE}/api/analysis/${id}`, {
-          headers: getAuthHeaders(),
-        })
-        if (!res.ok) {
-          setJob({ status: 'error', topics: [], error: 'Failed to fetch analysis status.' })
-          return
-        }
-        const data: JobState = await res.json()
-        setJob(data)
-
-        if (data.status === 'discovering') {
-          pollRef.current = setTimeout(() => pollJob(id), POLL_INTERVAL_MS)
-        } else {
-          // Poll less frequently to pick up topic check results
-          const anyChecking = data.topics.some((t) => t.check_status === 'checking')
-          if (anyChecking) {
-            pollRef.current = setTimeout(() => pollJob(id), POLL_INTERVAL_MS)
-          }
-        }
-      } catch {
-        setJob({ status: 'error', topics: [], error: 'Network error. Please try again.' })
+  const pollJob = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/analysis/inconsistencies`, {
+        headers: getAuthHeaders(),
+      })
+      if (!res.ok) {
+        setJob({ status: 'error', topics: [], error: 'Failed to fetch analysis status.' })
+        return
       }
-    },
-    [],
-  )
+      const data: JobState = await res.json()
+      setJob(data)
 
-  // Start analysis on mount, resuming cached job if available
+      if (data.status === 'discovering') {
+        pollRef.current = setTimeout(pollJob, POLL_INTERVAL_MS)
+      } else {
+        const anyChecking = data.topics.some((t) => t.check_status === 'checking')
+        if (anyChecking) {
+          pollRef.current = setTimeout(pollJob, POLL_INTERVAL_MS)
+        }
+      }
+    } catch {
+      setJob({ status: 'error', topics: [], error: 'Network error. Please try again.' })
+    }
+  }, [])
+
+  // On mount: try to resume an existing job, otherwise start a new one
   useEffect(() => {
     if (startedRef.current) return
     startedRef.current = true
 
     const startAnalysis = async () => {
-      // Resume existing job if one is cached for this session
-      const cachedJobId = sessionStorage.getItem('cross-check-job-id')
-      if (cachedJobId) {
-        try {
-          const res = await fetch(`${API_BASE}/api/analysis/${cachedJobId}`, {
-            headers: getAuthHeaders(),
-          })
-          if (res.ok) {
-            const data: JobState = await res.json()
-            setJobId(cachedJobId)
-            setJob(data)
-            // Resume polling if still in progress
-            const anyChecking = data.topics.some((t) => t.check_status === 'checking')
-            if (data.status === 'discovering' || anyChecking) {
-              pollRef.current = setTimeout(() => pollJob(cachedJobId), POLL_INTERVAL_MS)
-            }
-            return
-          }
-          // 404 or other error — server restarted, create a new job
-          sessionStorage.removeItem('cross-check-job-id')
-        } catch {
-          sessionStorage.removeItem('cross-check-job-id')
-        }
+      if (!sessionStorage.getItem('cross-check-session-id')) {
+        setStartError('No active session. Please upload files to get started.')
+        return
       }
 
-      // No cached job (or it expired) — start a new one
+      // Check if a job already exists for this session
+      try {
+        const res = await fetch(`${API_BASE}/api/analysis/inconsistencies`, {
+          headers: getAuthHeaders(),
+        })
+        if (res.ok) {
+          const data: JobState = await res.json()
+          setJob(data)
+          const anyChecking = data.topics.some((t) => t.check_status === 'checking')
+          if (data.status === 'discovering' || anyChecking) {
+            pollRef.current = setTimeout(pollJob, POLL_INTERVAL_MS)
+          }
+          return
+        }
+      } catch {
+        // Fall through to start a new job
+      }
+
+      // No existing job — start one
       try {
         const res = await fetch(`${API_BASE}/api/analysis/inconsistencies`, {
           method: 'POST',
@@ -301,13 +306,11 @@ export default function Inconsistencies() {
         })
         if (!res.ok) {
           const data = await res.json().catch(() => ({}))
-          setStartError(data.detail || 'Failed to start analysis.')
+          const detail = data.detail
+          setStartError(typeof detail === 'string' ? detail : 'Failed to start analysis.')
           return
         }
-        const data = await res.json()
-        sessionStorage.setItem('cross-check-job-id', data.job_id)
-        setJobId(data.job_id)
-        pollJob(data.job_id)
+        pollJob()
       } catch {
         setStartError('Unable to connect to the service. Please try again.')
       }
@@ -320,11 +323,69 @@ export default function Inconsistencies() {
     }
   }, [pollJob])
 
-  // Resume polling when a topic check is triggered
-  const handleCheck = async (topicId: number) => {
-    if (!jobId) return
+  const handleCheckBatch = async () => {
+    if (!job) return
 
-    // Optimistically mark as checking
+    const unchecked = job.topics.filter((t) => t.check_status === null || t.check_status === 'error').slice(0, 25)
+    if (unchecked.length === 0) return
+
+    const ids = unchecked.map((t) => t.id)
+
+    setJob((prev) =>
+      prev
+        ? {
+            ...prev,
+            topics: prev.topics.map((t) =>
+              ids.includes(t.id) ? { ...t, check_status: 'checking' } : t,
+            ),
+          }
+        : prev,
+    )
+
+    try {
+      await fetch(`${API_BASE}/api/analysis/inconsistencies/topics/check-batch`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ topic_ids: ids }),
+      })
+    } catch {
+      // Polling will surface any errors
+    }
+
+    if (pollRef.current) clearTimeout(pollRef.current)
+    pollRef.current = setTimeout(pollJob, POLL_INTERVAL_MS)
+  }
+
+  const handleCheckAll = async () => {
+    if (!job) return
+
+    setJob((prev) =>
+      prev
+        ? {
+            ...prev,
+            topics: prev.topics.map((t) =>
+              t.check_status === null || t.check_status === 'error'
+                ? { ...t, check_status: 'checking' }
+                : t,
+            ),
+          }
+        : prev,
+    )
+
+    try {
+      await fetch(`${API_BASE}/api/analysis/inconsistencies/topics/check-all`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+      })
+    } catch {
+      // Polling will surface any errors
+    }
+
+    if (pollRef.current) clearTimeout(pollRef.current)
+    pollRef.current = setTimeout(pollJob, POLL_INTERVAL_MS)
+  }
+
+  const handleCheck = async (topicId: number) => {
     setJob((prev) =>
       prev
         ? {
@@ -337,7 +398,7 @@ export default function Inconsistencies() {
     )
 
     try {
-      await fetch(`${API_BASE}/api/analysis/${jobId}/topics/${topicId}/check`, {
+      await fetch(`${API_BASE}/api/analysis/inconsistencies/topics/${topicId}/check`, {
         method: 'POST',
         headers: getAuthHeaders(),
       })
@@ -345,9 +406,8 @@ export default function Inconsistencies() {
       // Polling will surface any errors
     }
 
-    // Start polling to pick up the result
     if (pollRef.current) clearTimeout(pollRef.current)
-    pollRef.current = setTimeout(() => pollJob(jobId), POLL_INTERVAL_MS)
+    pollRef.current = setTimeout(pollJob, POLL_INTERVAL_MS)
   }
 
   return (
@@ -359,9 +419,6 @@ export default function Inconsistencies() {
       <Link href="/analyse" className="govuk-back-link">
         Back
       </Link>
-
-      <div className="govuk-grid-row">
-      <div className="govuk-grid-column-full">
 
       <h1 className="govuk-heading-xl">Check for inconsistencies</h1>
 
@@ -403,6 +460,32 @@ export default function Inconsistencies() {
               : `${job.topics.length} topic${job.topics.length !== 1 ? 's' : ''} found in your documents. Select a topic to check for inconsistencies.`}
           </p>
 
+          {job.topics.length > 0 && (() => {
+            const uncheckedCount = job.topics.filter((t) => t.check_status === null || t.check_status === 'error').length
+            const batchSize = Math.min(25, uncheckedCount)
+            if (uncheckedCount === 0) return null
+            return (
+              <div className="govuk-button-group" style={{ marginBottom: '20px' }}>
+                <button
+                  type="button"
+                  className="govuk-button"
+                  onClick={handleCheckAll}
+                >
+                  Check all {uncheckedCount} unchecked topic{uncheckedCount !== 1 ? 's' : ''}
+                </button>
+                {uncheckedCount > 25 && (
+                  <button
+                    type="button"
+                    className="govuk-button govuk-button--secondary"
+                    onClick={handleCheckBatch}
+                  >
+                    Check next {batchSize}
+                  </button>
+                )}
+              </div>
+            )
+          })()}
+
           {job.topics.length > 0 && (
             <table className="govuk-table" style={{ tableLayout: 'fixed', width: '100%' }}>
               <colgroup>
@@ -443,8 +526,6 @@ export default function Inconsistencies() {
         </>
       )}
 
-      </div>
-      </div>
     </Layout>
   )
 }

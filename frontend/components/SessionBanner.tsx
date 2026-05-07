@@ -5,7 +5,9 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000'
 
 interface SessionData {
   fileCount: number
+  issueCount: number | null
   expiresAt: number
+  finalised: boolean
 }
 
 export default function SessionBanner() {
@@ -17,18 +19,31 @@ export default function SessionBanner() {
     const expiresAt = sessionStorage.getItem('cross-check-expires-at')
     if (!sessionId || !expiresAt) return
 
-    const authToken = sessionStorage.getItem('prototype-auth-token')
-    fetch(`${API_BASE}/api/collection`, {
-      headers: {
-        'X-Session-ID': sessionId,
-        ...(authToken ? { 'X-Prototype-Auth': authToken } : {}),
-      },
-    })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (data) setSession({ fileCount: data.file_count, expiresAt: Number(expiresAt) })
+    const headers = {
+      'X-Session-ID': sessionId,
+      ...(sessionStorage.getItem('prototype-auth-token')
+        ? { 'X-Prototype-Auth': sessionStorage.getItem('prototype-auth-token') as string }
+        : {}),
+    }
+
+    Promise.all([
+      fetch(`${API_BASE}/api/collection`, { headers }).then((r) => (r.ok ? r.json() : null)),
+      fetch(`${API_BASE}/api/issues`, { headers }).then((r) => (r.ok ? r.json() : null)),
+    ]).then(([collection, issues]) => {
+      if (!collection) return
+      const issueCount = issues
+        ? Object.values(issues.modules as Record<string, { issue_count: number }>).reduce(
+            (sum, m) => sum + m.issue_count,
+            0,
+          )
+        : 0
+      setSession({
+        fileCount: collection.file_count,
+        issueCount: collection.finalised ? issueCount : null,
+        expiresAt: Number(expiresAt),
+        finalised: collection.finalised,
       })
-      .catch(() => {})
+    }).catch(() => {})
   }, [])
 
   if (!session) return null
@@ -48,36 +63,33 @@ export default function SessionBanner() {
     router.push('/upload')
   }
 
-  const fileWord = session.fileCount === 1 ? 'file' : 'files'
+  const linkStyle = {
+    display: 'inline' as const,
+    border: 'none',
+    background: 'none',
+    cursor: 'pointer',
+    padding: 0,
+    font: 'inherit',
+    lineHeight: 'inherit',
+  }
 
   return (
     <div style={{ background: '#f3f2f1', borderBottom: '1px solid #b1b4b6', padding: '8px 0' }}>
       <div className="govuk-width-container">
-        <p className="govuk-body-s" style={{ margin: 0 }}>
-          {session.fileCount} {fileWord} ready for analysis. Files will be deleted on{' '}
-          <strong>{formatExpiry(session.expiresAt)}</strong>.{' '}
+        <div className="govuk-body-s" style={{ margin: 0, display: 'flex', gap: '24px', alignItems: 'center' }}>
+          <span>Expires {formatExpiry(session.expiresAt)}</span>
           <a href="/upload" className="govuk-link govuk-link--no-visited-state">
-            View files
+            View files ({session.fileCount})
           </a>
-          {' or '}
-          <button
-            type="button"
-            onClick={handleStartAgain}
-            className="govuk-link govuk-link--no-visited-state"
-            style={{
-              display: 'inline',
-              border: 'none',
-              background: 'none',
-              cursor: 'pointer',
-              padding: 0,
-              font: 'inherit',
-              lineHeight: 'inherit',
-            }}
-          >
-            start again with new files
+          {session.finalised && (
+            <a href="/issues" className="govuk-link govuk-link--no-visited-state">
+              View issues ({session.issueCount ?? 0})
+            </a>
+          )}
+          <button type="button" onClick={handleStartAgain} className="govuk-link govuk-link--no-visited-state" style={linkStyle}>
+            Start again
           </button>
-          .
-        </p>
+        </div>
       </div>
     </div>
   )

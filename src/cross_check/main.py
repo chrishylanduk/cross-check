@@ -325,7 +325,7 @@ def _db_count_sessions() -> int:
 # Security constants
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB per file
 MAX_FILENAME_LENGTH = 255  # Standard filesystem limit
-MAX_FILES_PER_UPLOAD = 100  # Prevent DoS
+MAX_FILES_PER_UPLOAD = 5000  # Prevent DoS
 MAX_STORAGE_PER_SESSION = 50 * 1024 * 1024  # 50MB per session
 SESSION_TIMEOUT = 86400  # 24 hours in seconds
 
@@ -972,41 +972,104 @@ async def finalise_collection(
 # Analysis endpoints
 # ---------------------------------------------------------------------------
 
+# Jobs are keyed by "{session_id}:{analysis_type}" so there is exactly one
+# job per analysis type per session. No separate job ID is needed.
 
-async def _run_topic_discovery(job_id: str, session_id: str) -> None:
+# Limit concurrent LLM calls across all topic checks to avoid hammering the API.
+LLM_CONCURRENCY = int(os.getenv("LLM_CONCURRENCY", "5"))
+_llm_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_llm_semaphore() -> asyncio.Semaphore:
+    global _llm_semaphore
+    if _llm_semaphore is None:
+        _llm_semaphore = asyncio.Semaphore(LLM_CONCURRENCY)
+    return _llm_semaphore
+
+
+def _job_key(session_id: str, analysis_type: str) -> str:
+    return f"{session_id}:{analysis_type}"
+
+
+@app.get("/api/issues")
+@limiter.limit("30/minute")
+async def get_issues(
+    request: Request,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+) -> dict:
+    """Return all issues found across all analysis modules for the session."""
+    validate_session(x_session_id, request)
+
+    issues = []
+    modules: Dict[str, dict] = {}
+
+    job = analysis_jobs.get(_job_key(x_session_id, "inconsistencies"))
+    if job:
+        topics = job.get("topics", [])
+        total = len(topics)
+        checked = sum(1 for t in topics if t.get("check_status") == "complete")
+        in_progress = sum(1 for t in topics if t.get("check_status") == "checking")
+        issue_count = 0
+
+        for topic in topics:
+            if topic.get("check_status") != "complete":
+                continue
+            result = topic.get("result") or {}
+            if not result.get("has_inconsistencies"):
+                continue
+            for item in result.get("inconsistencies", []):
+                issues.append(
+                    {
+                        "source": "inconsistencies",
+                        "topic_label": topic["label"],
+                        **item,
+                    }
+                )
+                issue_count += 1
+
+        modules["inconsistencies"] = {
+            "status": job["status"],
+            "total_topics": total,
+            "checked_topics": checked,
+            "in_progress_topics": in_progress,
+            "issue_count": issue_count,
+        }
+
+    return {"issues": issues, "modules": modules}
+
+
+async def _run_topic_discovery(session_id: str, analysis_type: str) -> None:
     """Background task: chunk documents, embed, and run BERTopic."""
+    key = _job_key(session_id, analysis_type)
     try:
         session_dir = DATA_DIR / session_id
         chunks = chunk_documents(session_dir)
         embeddings = embed_chunks(chunks)
         topics = run_topic_model(chunks, embeddings)
 
-        # Serialise topics into the job state (store chunk_indices to retrieve later)
-        analysis_jobs[job_id]["topics"] = [
+        analysis_jobs[key]["topics"] = [
             {**t.model_dump(), "check_status": None, "result": None} for t in topics
         ]
-        analysis_jobs[job_id]["chunks"] = [c.model_dump() for c in chunks]
-        analysis_jobs[job_id]["status"] = "topics_ready"
-        logger.info(
-            f"Topic discovery complete for job {job_id[:8]}...: {len(topics)} topics"
-        )
+        analysis_jobs[key]["chunks"] = [c.model_dump() for c in chunks]
+        analysis_jobs[key]["status"] = "topics_ready"
+        logger.info(f"Topic discovery complete for {key[:16]}...: {len(topics)} topics")
     except Exception as exc:
-        logger.exception(f"Topic discovery failed for job {job_id[:8]}...")
-        analysis_jobs[job_id]["status"] = "error"
-        analysis_jobs[job_id]["error"] = str(exc)
+        logger.exception(f"Topic discovery failed for {key[:16]}...")
+        analysis_jobs[key]["status"] = "error"
+        analysis_jobs[key]["error"] = str(exc)
 
 
-async def _run_topic_check(job_id: str, topic_id: int) -> None:
+async def _run_topic_check(session_id: str, analysis_type: str, topic_id: int) -> None:
     """Background task: run LLM inconsistency check for a single topic."""
+    key = _job_key(session_id, analysis_type)
     try:
-        job = analysis_jobs[job_id]
+        job = analysis_jobs[key]
         topic = TopicInfo(**next(t for t in job["topics"] if t["id"] == topic_id))
-        chunks_raw = job["chunks"]
-
-        all_chunks = [Chunk(**c) for c in chunks_raw]
-        result: InconsistencyResult = await check_topic_inconsistencies(
-            topic, all_chunks
-        )
+        all_chunks = [Chunk(**c) for c in job["chunks"]]
+        async with _get_llm_semaphore():
+            result: InconsistencyResult = await check_topic_inconsistencies(
+                topic, all_chunks
+            )
 
         for t in job["topics"]:
             if t["id"] == topic_id:
@@ -1015,16 +1078,26 @@ async def _run_topic_check(job_id: str, topic_id: int) -> None:
                 break
 
         logger.info(
-            f"Topic check complete for job {job_id[:8]}... topic {topic_id}: "
+            f"Topic check complete: {key[:16]}... topic {topic_id}: "
             f"{'issues found' if result.has_inconsistencies else 'no issues'}"
         )
     except Exception as exc:
-        logger.exception(f"Topic check failed for job {job_id[:8]}... topic {topic_id}")
-        for t in analysis_jobs[job_id]["topics"]:
+        logger.exception(f"Topic check failed: {key[:16]}... topic {topic_id}")
+        for t in analysis_jobs[key]["topics"]:
             if t["id"] == topic_id:
                 t["check_status"] = "error"
                 t["error"] = str(exc)
                 break
+
+
+def _get_ready_job(session_id: str, analysis_type: str) -> dict:
+    """Return the job if it exists and topics are ready, else raise."""
+    job = analysis_jobs.get(_job_key(session_id, analysis_type))
+    if job is None:
+        raise HTTPException(status_code=404, detail="Analysis job not found")
+    if job["status"] != "topics_ready":
+        raise HTTPException(status_code=400, detail="Topics not yet ready")
+    return job
 
 
 @app.post("/api/analysis/inconsistencies")
@@ -1033,7 +1106,7 @@ async def start_inconsistency_analysis(
     request: Request,
     x_session_id: str = Header(..., alias="X-Session-ID"),
 ) -> dict:
-    """Start an inconsistency analysis job for a finalised collection."""
+    """Start (or restart) an inconsistency analysis for a finalised collection."""
     validate_session(x_session_id, request)
 
     session = _db_get_session(x_session_id)
@@ -1042,8 +1115,7 @@ async def start_inconsistency_analysis(
             status_code=400, detail="Collection must be finalised before analysis"
         )
 
-    job_id = secrets.token_urlsafe(16)
-    analysis_jobs[job_id] = {
+    analysis_jobs[_job_key(x_session_id, "inconsistencies")] = {
         "session_id": x_session_id,
         "status": "discovering",
         "topics": [],
@@ -1052,59 +1124,100 @@ async def start_inconsistency_analysis(
         "error": None,
     }
 
-    asyncio.create_task(_run_topic_discovery(job_id, x_session_id))
-    logger.info(
-        f"Analysis job {job_id[:8]}... started for session {x_session_id[:8]}..."
-    )
-    return {"job_id": job_id}
+    asyncio.create_task(_run_topic_discovery(x_session_id, "inconsistencies"))
+    logger.info(f"Inconsistencies analysis started for session {x_session_id[:8]}...")
+    return {"status": "started"}
 
 
-@app.get("/api/analysis/{job_id}")
+@app.get("/api/analysis/inconsistencies")
 @limiter.limit("30/minute")
-async def get_analysis_job(
+async def get_inconsistency_analysis(
     request: Request,
-    job_id: str,
     x_session_id: str = Header(..., alias="X-Session-ID"),
 ) -> dict:
-    """Poll the status and results of an analysis job."""
+    """Poll the status and results of the inconsistency analysis."""
     validate_session(x_session_id, request)
 
-    job = analysis_jobs.get(job_id)
+    job = analysis_jobs.get(_job_key(x_session_id, "inconsistencies"))
     if job is None:
         raise HTTPException(status_code=404, detail="Analysis job not found")
-    if job["session_id"] != x_session_id:
-        raise HTTPException(status_code=403, detail="Access denied")
 
-    # Strip chunk_indices (internal index) from the response; keep topic_chunks
-    topics_out = []
-    for t in job["topics"]:
-        topics_out.append({k: v for k, v in t.items() if k != "chunk_indices"})
-
-    return {
-        "status": job["status"],
-        "topics": topics_out,
-        "error": job["error"],
-    }
+    topics_out = [
+        {k: v for k, v in t.items() if k != "chunk_indices"} for t in job["topics"]
+    ]
+    return {"status": job["status"], "topics": topics_out, "error": job["error"]}
 
 
-@app.post("/api/analysis/{job_id}/topics/{topic_id}/check")
+class BatchCheckRequest(BaseModel):
+    """Request model for batch topic checks."""
+
+    topic_ids: List[int]
+
+
+@app.post("/api/analysis/inconsistencies/topics/check-all")
+@limiter.limit("5/minute")
+async def check_all_topics(
+    request: Request,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+) -> dict:
+    """Trigger checks for all unchecked or previously errored topics."""
+    validate_session(x_session_id, request)
+    job = _get_ready_job(x_session_id, "inconsistencies")
+
+    started = []
+    for topic in job["topics"]:
+        if topic.get("check_status") in (None, "error"):
+            topic["check_status"] = "checking"
+            asyncio.create_task(
+                _run_topic_check(x_session_id, "inconsistencies", topic["id"])
+            )
+            started.append(topic["id"])
+
+    logger.info(
+        f"Check-all triggered for session {x_session_id[:8]}...: {len(started)} topic(s)"
+    )
+    return {"message": f"Started {len(started)} checks", "started": started}
+
+
+@app.post("/api/analysis/inconsistencies/topics/check-batch")
+@limiter.limit("10/minute")
+async def check_topics_batch(
+    request: Request,
+    body: BatchCheckRequest,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+) -> dict:
+    """Trigger parallel LLM inconsistency checks for multiple topics."""
+    validate_session(x_session_id, request)
+    job = _get_ready_job(x_session_id, "inconsistencies")
+
+    if len(body.topic_ids) > 25:
+        raise HTTPException(status_code=400, detail="Maximum 25 topics per batch")
+
+    started = []
+    for topic_id in body.topic_ids:
+        topic = next((t for t in job["topics"] if t["id"] == topic_id), None)
+        if topic is None or topic.get("check_status") in ("checking", "complete"):
+            continue
+        topic["check_status"] = "checking"
+        asyncio.create_task(_run_topic_check(x_session_id, "inconsistencies", topic_id))
+        started.append(topic_id)
+
+    logger.info(
+        f"Batch check triggered for session {x_session_id[:8]}...: {len(started)} topic(s)"
+    )
+    return {"message": f"Started {len(started)} checks", "started": started}
+
+
+@app.post("/api/analysis/inconsistencies/topics/{topic_id}/check")
 @limiter.limit("20/minute")
 async def check_topic(
     request: Request,
-    job_id: str,
     topic_id: int,
     x_session_id: str = Header(..., alias="X-Session-ID"),
 ) -> dict:
-    """Trigger an LLM inconsistency check for a specific topic in an analysis job."""
+    """Trigger an LLM inconsistency check for a specific topic."""
     validate_session(x_session_id, request)
-
-    job = analysis_jobs.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Analysis job not found")
-    if job["session_id"] != x_session_id:
-        raise HTTPException(status_code=403, detail="Access denied")
-    if job["status"] != "topics_ready":
-        raise HTTPException(status_code=400, detail="Topics not yet ready")
+    job = _get_ready_job(x_session_id, "inconsistencies")
 
     topic = next((t for t in job["topics"] if t["id"] == topic_id), None)
     if topic is None:
@@ -1113,6 +1226,8 @@ async def check_topic(
         return {"message": "Already checking or complete"}
 
     topic["check_status"] = "checking"
-    asyncio.create_task(_run_topic_check(job_id, topic_id))
-    logger.info(f"Topic check triggered: job {job_id[:8]}... topic {topic_id}")
+    asyncio.create_task(_run_topic_check(x_session_id, "inconsistencies", topic_id))
+    logger.info(
+        f"Topic check triggered: session {x_session_id[:8]}... topic {topic_id}"
+    )
     return {"message": "Check started"}
