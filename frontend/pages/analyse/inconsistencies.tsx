@@ -272,6 +272,7 @@ export default function Inconsistencies() {
       setJob(data)
 
       if (data.status === 'discovering') {
+        // eslint-disable-next-line react-hooks/immutability
         schedule(pollJob)
       } else {
         const anyChecking = data.topics.some((t) => t.check_status === 'checking')

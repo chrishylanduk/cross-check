@@ -326,7 +326,9 @@ export default function Issues() {
               <div key={page} style={{ borderTop: '2px solid #b1b4b6', paddingTop: '16px', marginBottom: '24px' }}>
                 <div style={{ display: 'flex', gap: '12px', alignItems: 'baseline', marginBottom: '4px' }}>
                   <h3 className="govuk-heading-s" style={{ margin: 0 }}>{displayFilename(page)}</h3>
+                  {/* eslint-disable-next-line security/detect-object-injection */}
                   {urlMap[page] && (
+                    // eslint-disable-next-line security/detect-object-injection
                     <a href={urlMap[page]} target="_blank" rel="noopener noreferrer" className="govuk-link govuk-link--no-visited-state govuk-body-s">
                       View live version
                     </a>

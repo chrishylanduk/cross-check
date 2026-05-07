@@ -41,7 +41,7 @@ jobs:
           path: bandit-report.json
 
       - name: Fail on high/medium findings
-        run: bandit -c pyproject.toml -r src/ --severity-level medium --exit-zero-on-skips
+        run: bandit -c pyproject.toml -r src/ --severity-level medium
 
   # ── Python dependency audit ────────────────────────────────────────────────
   pip-audit:
@@ -62,20 +62,7 @@ jobs:
         run: |
           pip install pip-audit
           uv export --no-dev --format requirements-txt > /tmp/requirements.txt
-          pip-audit -r /tmp/requirements.txt --output pip-audit-report.json --format json
-        continue-on-error: true
-
-      - name: Upload pip-audit report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pip-audit-report
-          path: pip-audit-report.json
-
-      - name: Fail on critical/high vulnerabilities
-        run: |
-          uv export --no-dev --format requirements-txt > /tmp/requirements.txt
-          pip-audit -r /tmp/requirements.txt --severity high
+          pip-audit -r /tmp/requirements.txt
 
   # ── Frontend dependency audit ──────────────────────────────────────────────
   npm-audit:
@@ -98,6 +85,28 @@ jobs:
       - name: Run npm audit
         working-directory: frontend
         run: npm audit --audit-level=high
+
+  # ── Frontend SAST (ESLint security plugins) ───────────────────────────────
+  eslint-security:
+    name: ESLint security (frontend SAST)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci --prefer-offline
+
+      - name: Run ESLint security rules
+        working-directory: frontend
+        run: npx eslint pages/ components/ --ext .ts,.tsx --max-warnings 0
 
   # ── Secret detection ───────────────────────────────────────────────────────
   detect-secrets:

@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import Head from 'next/head'
+import Link from 'next/link'
 import { useRouter } from 'next/router'
 import Layout from '@/components/Layout'
 
@@ -60,10 +61,10 @@ export default function Home() {
           </p>
           <p className="govuk-body">Save hours or days compared to a manual content audit.</p>
 
-          <a
+          <Link
             href="/upload"
             role="button"
-            draggable="false"
+            draggable={false}
             className="govuk-button govuk-button--start"
             data-module="govuk-button"
           >
@@ -79,7 +80,7 @@ export default function Home() {
             >
               <path fill="currentColor" d="M0 0h13l20 20-20 20H0l20-20z" />
             </svg>
-          </a>
+          </Link>
     </Layout>
   )
 }

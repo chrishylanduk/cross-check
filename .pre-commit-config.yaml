@@ -58,6 +58,21 @@ repos:
         name: detect-secrets - Detect secrets in staged code
         exclude: .*/tests/.*|^\.cruft\.json$
 
+  - repo: https://github.com/semgrep/semgrep
+    rev: v1.162.0
+    hooks:
+      - id: semgrep
+        name: Semgrep SAST
+        args:
+          - scan
+          - --config=p/python
+          - --config=p/typescript
+          - --config=p/react
+          - --config=p/owasp-top-ten
+          - --config=p/secrets
+          - --error
+        pass_filenames: false
+
   - repo: https://github.com/PyCQA/bandit
     rev: 1.8.3
     hooks:
@@ -68,6 +83,27 @@ repos:
 
   - repo: local
     hooks:
+      - id: pip-audit
+        name: pip-audit - Python dependency vulnerabilities
+        language: system
+        entry: bash -c 'uv run pip-audit --path .venv'
+        pass_filenames: false
+        files: '^(pyproject\.toml|uv\.lock)$'
+
+      - id: npm-audit
+        name: npm audit - Frontend dependency vulnerabilities
+        language: system
+        entry: bash -c 'cd frontend && npm audit --audit-level=high'
+        pass_filenames: false
+        files: '^frontend/package(-lock)?\.json$'
+
+      - id: eslint-security
+        name: ESLint security rules
+        language: system
+        entry: bash -c 'cd frontend && npx eslint pages/ components/ --ext .ts,.tsx --max-warnings 0'
+        pass_filenames: false
+        files: '^frontend/.*\.(ts|tsx)$'
+
       - id: typescript
         name: TypeScript type check
         language: system
