@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import logging
 import mimetypes
 import os
@@ -17,7 +18,6 @@ from typing import Dict, List, Optional
 import aiofiles
 import filetype
 from dotenv import load_dotenv
-from openinference.instrumentation.openai import OpenAIInstrumentor
 from phoenix.otel import register as phoenix_register
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,12 +31,15 @@ from slowapi.util import get_remote_address
 
 from .analysis import (
     Chunk,
+    ComplianceResult,
     InconsistencyResult,
     TopicInfo,
+    check_page_compliance,
     check_topic_inconsistencies,
     chunk_documents,
     embed_chunks,
     run_topic_model,
+    summarise_issues,
 )
 
 # Load environment variables from .env file (for local development)
@@ -73,6 +76,25 @@ limiter = Limiter(key_func=get_remote_address)
 PHOENIX_ENDPOINT = os.getenv("PHOENIX_ENDPOINT", "")
 
 
+def _instrument_providers(tracer_provider: object) -> None:
+    """Instrument whichever OpenInference provider packages are installed."""
+    instrumentors = [
+        ("openinference.instrumentation.openai", "OpenAIInstrumentor"),
+        ("openinference.instrumentation.anthropic", "AnthropicInstrumentor"),
+        ("openinference.instrumentation.google_genai", "GoogleGenAIInstrumentor"),
+        ("openinference.instrumentation.mistralai", "MistralAIInstrumentor"),
+    ]
+    for module_name, class_name in instrumentors:
+        try:
+            import importlib
+
+            module = importlib.import_module(module_name)
+            getattr(module, class_name)().instrument(tracer_provider=tracer_provider)
+            logger.debug(f"Instrumented {class_name}")
+        except ImportError:
+            pass
+
+
 def _configure_tracing() -> None:
     """Set up OpenTelemetry export to Arize Phoenix (if PHOENIX_ENDPOINT is set)."""
     if not PHOENIX_ENDPOINT:
@@ -81,7 +103,7 @@ def _configure_tracing() -> None:
         project_name="cross-check",
         endpoint=f"{PHOENIX_ENDPOINT}/v1/traces",
     )
-    OpenAIInstrumentor().instrument(tracer_provider=tracer_provider)
+    _instrument_providers(tracer_provider)
     logger.info(f"OpenTelemetry tracing → {PHOENIX_ENDPOINT}")
 
 
@@ -240,9 +262,13 @@ async def session_cleanup_loop():
 
 # Data directory for collections (ephemeral disk storage)
 # Project root = src/cross_check/main.py -> ../../.. = project root
-_DATA_ROOT = Path(__file__).parent.parent.parent / "data"
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
+_DATA_ROOT = _PROJECT_ROOT / "data"
 DATA_DIR = _DATA_ROOT / "collections"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# Directory for pre-built content guideline presets (committed to the repo)
+GUIDELINES_DIR = _PROJECT_ROOT / "guidelines"
 
 # SQLite database for session metadata
 DB_PATH = _DATA_ROOT / "sessions.db"
@@ -269,6 +295,13 @@ def _init_db() -> None:
                     CHECK(created_at > 0),
                 finalised INTEGER NOT NULL DEFAULT 0
                     CHECK(finalised IN (0, 1))
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS compliance_guidelines (
+                session_id TEXT PRIMARY KEY,
+                guidelines TEXT NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES sessions(session_id)
             )
         """)
 
@@ -322,6 +355,32 @@ def _db_count_sessions() -> int:
     return row[0] if row else 0
 
 
+def _db_get_compliance_guidelines(session_id: str) -> Optional[str]:
+    with _db_conn() as conn:
+        row = conn.execute(
+            "SELECT guidelines FROM compliance_guidelines WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    return row["guidelines"] if row else None
+
+
+def _db_set_compliance_guidelines(session_id: str, guidelines: str) -> None:
+    with _db_conn() as conn:
+        conn.execute(
+            "INSERT INTO compliance_guidelines (session_id, guidelines) VALUES (?, ?)"
+            " ON CONFLICT(session_id) DO UPDATE SET guidelines = excluded.guidelines",
+            (session_id, guidelines),
+        )
+
+
+def _db_delete_compliance_guidelines(session_id: str) -> None:
+    with _db_conn() as conn:
+        conn.execute(
+            "DELETE FROM compliance_guidelines WHERE session_id = ?",
+            (session_id,),
+        )
+
+
 # Security constants
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB per file
 MAX_FILENAME_LENGTH = 255  # Standard filesystem limit
@@ -367,6 +426,45 @@ def _strip_after_last_occurrence(content: str, marker: str) -> str:
     if pos == -1:
         return content
     return content[:pos].rstrip("\n")
+
+
+def _get_url_map(session_id: str) -> Dict[str, str]:
+    """Return a {filename: url} map for all files that have metadata."""
+    session_dir = DATA_DIR / session_id
+    url_map: Dict[str, str] = {}
+    try:
+        for meta_path in session_dir.glob("*.metadata"):
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                if meta.get("url"):
+                    url_map[meta_path.name.removesuffix(".metadata")] = meta["url"]
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return url_map
+
+
+def _extract_og_url(html_bytes: bytes) -> str | None:
+    """Extract og:url from HTML meta tag, trying common encodings."""
+    for encoding in ("utf-8", "latin-1"):
+        try:
+            html = html_bytes.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        return None
+    match = re.search(
+        r'<meta\s[^>]*property=["\']og:url["\']\s[^>]*content=["\']([^"\']+)["\']',
+        html,
+        re.IGNORECASE,
+    ) or re.search(
+        r'<meta\s[^>]*content=["\']([^"\']+)["\']\s[^>]*property=["\']og:url["\']',
+        html,
+        re.IGNORECASE,
+    )
+    return match.group(1).strip() if match else None
 
 
 def create_session() -> str:
@@ -664,8 +762,12 @@ async def upload_files(
             )
             continue
 
-        # Sanitise filename to prevent issues
-        safe_filename = sanitize_filename(file.filename)
+        # Sanitise filename to prevent issues; replace path separators with a
+        # dash before sanitising so folder structure is readable in the filename
+        raw_filename = file.filename.replace("\\", "/")
+        path_parts = [p for p in raw_filename.split("/") if p]
+        joined = "-".join(path_parts) if len(path_parts) > 1 else raw_filename
+        safe_filename = sanitize_filename(joined)
         if not safe_filename:
             raise HTTPException(status_code=400, detail="Invalid filename")
 
@@ -679,6 +781,9 @@ async def upload_files(
             try:
                 result = md_converter.convert(str(temp_path))
                 markdown_content = result.text_content
+
+                # Normalise non-breaking spaces to regular spaces
+                markdown_content = markdown_content.replace(" ", " ")
 
                 # Validate markdown output
                 if not markdown_content or not markdown_content.strip():
@@ -711,6 +816,16 @@ async def upload_files(
 
             async with aiofiles.open(md_path, "w", encoding="utf-8") as f:
                 await f.write(markdown_content)
+
+            # Extract and persist page metadata
+            metadata: dict = {}
+            if mime_type == "text/html":
+                og_url = _extract_og_url(content)
+                if og_url:
+                    metadata["url"] = og_url
+            metadata_path = session_dir / (md_filename + ".metadata")
+            async with aiofiles.open(metadata_path, "w", encoding="utf-8") as f:
+                await f.write(json.dumps(metadata))
 
             file_size = md_path.stat().st_size
             total_new_size += file_size
@@ -768,7 +883,11 @@ async def get_collection(
 
     try:
         for file_path in session_dir.iterdir():
-            if file_path.is_file() and not file_path.name.startswith("temp_"):
+            if (
+                file_path.is_file()
+                and not file_path.name.startswith("temp_")
+                and not file_path.name.endswith(".metadata")
+            ):
                 size = file_path.stat().st_size
                 files.append(
                     {
@@ -1035,7 +1154,80 @@ async def get_issues(
             "issue_count": issue_count,
         }
 
-    return {"issues": issues, "modules": modules}
+    compliance_job = analysis_jobs.get(_job_key(x_session_id, "compliance"))
+    if compliance_job:
+        pages = compliance_job.get("pages", [])
+        total = len(pages)
+        checked = sum(1 for p in pages if p.get("check_status") == "complete")
+        in_progress = sum(1 for p in pages if p.get("check_status") == "checking")
+        issue_count = 0
+        for page in pages:
+            if page.get("check_status") != "complete":
+                continue
+            result = page.get("result") or {}
+            if not result.get("has_issues"):
+                continue
+            for item in result.get("issues", []):
+                issues.append(
+                    {
+                        "source": "compliance",
+                        "topic_label": page["filename"],
+                        "type": "compliance_violation",
+                        "documents_involved": [page["filename"]],
+                        **item,
+                    }
+                )
+                issue_count += 1
+        modules["compliance"] = {
+            "status": compliance_job["status"],
+            "total_topics": total,
+            "checked_topics": checked,
+            "in_progress_topics": in_progress,
+            "issue_count": issue_count,
+        }
+
+    return {"issues": issues, "modules": modules, "url_map": _get_url_map(x_session_id)}
+
+
+@app.post("/api/issues/{module}/summarise")
+@limiter.limit("10/minute")
+async def summarise_module_issues(
+    request: Request,
+    module: str,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+) -> dict:
+    """Generate an LLM summary of all found issues for the given module."""
+    validate_session(x_session_id, request)
+
+    if module not in ("inconsistencies", "compliance"):
+        raise HTTPException(status_code=400, detail="Invalid module")
+
+    job = analysis_jobs.get(_job_key(x_session_id, module))
+    if not job:
+        raise HTTPException(status_code=404, detail="No analysis job found")
+
+    issues: list[dict] = []
+    if module == "inconsistencies":
+        for topic in job.get("topics", []):
+            if topic.get("check_status") != "complete":
+                continue
+            for item in (topic.get("result") or {}).get("inconsistencies", []):
+                issues.append({"description": item.get("description", "")})
+    else:
+        for page in job.get("pages", []):
+            if page.get("check_status") != "complete":
+                continue
+            for item in (page.get("result") or {}).get("issues", []):
+                issues.append({"description": item.get("description", "")})
+
+    if not issues:
+        return {"summary": "No issues to summarise."}
+
+    guidelines = (
+        _db_get_compliance_guidelines(x_session_id) if module == "compliance" else None
+    )
+    summary = await summarise_issues(issues, guidelines=guidelines)
+    return {"summary": summary}
 
 
 async def _run_topic_discovery(session_id: str, analysis_type: str) -> None:
@@ -1145,7 +1337,12 @@ async def get_inconsistency_analysis(
     topics_out = [
         {k: v for k, v in t.items() if k != "chunk_indices"} for t in job["topics"]
     ]
-    return {"status": job["status"], "topics": topics_out, "error": job["error"]}
+    return {
+        "status": job["status"],
+        "topics": topics_out,
+        "error": job["error"],
+        "url_map": _get_url_map(x_session_id),
+    }
 
 
 class BatchCheckRequest(BaseModel):
@@ -1231,3 +1428,304 @@ async def check_topic(
         f"Topic check triggered: session {x_session_id[:8]}... topic {topic_id}"
     )
     return {"message": "Check started"}
+
+
+# ---------------------------------------------------------------------------
+# Compliance guidelines endpoints
+# ---------------------------------------------------------------------------
+
+
+class ComplianceGuidelinesRequest(BaseModel):
+    guidelines: str
+
+
+@app.get("/api/compliance/guidelines")
+@limiter.limit("30/minute")
+async def get_compliance_guidelines(
+    request: Request,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+) -> dict:
+    """Return the compliance guidelines for this session, or 404 if not set."""
+    validate_session(x_session_id, request)
+    guidelines = _db_get_compliance_guidelines(x_session_id)
+    if guidelines is None:
+        raise HTTPException(status_code=404, detail="No compliance guidelines set")
+    return {"guidelines": guidelines}
+
+
+@app.post("/api/compliance/guidelines")
+@limiter.limit("20/minute")
+async def set_compliance_guidelines(
+    request: Request,
+    body: ComplianceGuidelinesRequest,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+) -> dict:
+    """Save compliance guidelines and clear any existing compliance job."""
+    validate_session(x_session_id, request)
+
+    MAX_GUIDELINES_LENGTH = 50_000
+
+    stripped = body.guidelines.strip()
+    if not stripped:
+        raise HTTPException(status_code=400, detail="Guidelines must not be empty")
+    if len(stripped) > MAX_GUIDELINES_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Guidelines must not exceed {MAX_GUIDELINES_LENGTH:,} characters",
+        )
+
+    _db_set_compliance_guidelines(x_session_id, stripped)
+    analysis_jobs.pop(_job_key(x_session_id, "compliance"), None)
+    logger.info(f"Compliance guidelines updated for session {x_session_id[:8]}...")
+    return {"message": "Guidelines saved", "guidelines": stripped}
+
+
+# ---------------------------------------------------------------------------
+# Guideline presets endpoints (served from the guidelines/ directory)
+# ---------------------------------------------------------------------------
+
+_ALLOWED_GUIDELINE_EXTENSIONS = {".txt", ".md"}
+
+
+@app.get("/api/guidelines")
+@limiter.limit("60/minute")
+async def list_guidelines(request: Request) -> dict:
+    """List available guideline preset files from the guidelines/ directory."""
+    if not GUIDELINES_DIR.exists():
+        return {"guidelines": []}
+    presets = []
+    for path in sorted(GUIDELINES_DIR.iterdir()):
+        if path.is_file() and path.suffix.lower() in _ALLOWED_GUIDELINE_EXTENSIONS:
+            label = path.stem.replace("-", " ").replace("_", " ").title()
+            presets.append({"filename": path.name, "label": label})
+    return {"guidelines": presets}
+
+
+@app.get("/api/guidelines/{filename}")
+@limiter.limit("60/minute")
+async def get_guideline(request: Request, filename: str) -> Response:
+    """Return the content of a specific guideline preset file."""
+    safe_filename = sanitize_filename(filename)
+    if not safe_filename or safe_filename != filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    path = GUIDELINES_DIR / safe_filename
+    # Prevent path traversal
+    try:
+        path.resolve().relative_to(GUIDELINES_DIR.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    if path.suffix.lower() not in _ALLOWED_GUIDELINE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="File type not supported")
+
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Guideline not found")
+
+    content = path.read_text(encoding="utf-8")
+    return Response(content=content, media_type="text/plain; charset=utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Compliance analysis endpoints
+# ---------------------------------------------------------------------------
+
+
+def _get_compliance_ready_job(session_id: str) -> dict:
+    """Return the compliance job if pages are ready, else raise."""
+    job = analysis_jobs.get(_job_key(session_id, "compliance"))
+    if job is None:
+        raise HTTPException(status_code=404, detail="Compliance job not found")
+    if job["status"] != "pages_ready":
+        raise HTTPException(status_code=400, detail="Pages not yet ready")
+    return job
+
+
+@app.post("/api/analysis/compliance")
+@limiter.limit("5/minute")
+async def start_compliance_analysis(
+    request: Request,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+) -> dict:
+    """Create a compliance analysis job listing all pages in the collection."""
+    validate_session(x_session_id, request)
+
+    session = _db_get_session(x_session_id)
+    if not session or not session["finalised"]:
+        raise HTTPException(
+            status_code=400, detail="Collection must be finalised before analysis"
+        )
+
+    guidelines = _db_get_compliance_guidelines(x_session_id)
+    if not guidelines:
+        raise HTTPException(
+            status_code=400, detail="Set compliance guidelines before starting analysis"
+        )
+
+    session_dir = DATA_DIR / x_session_id
+    pages = []
+    for idx, md_file in enumerate(sorted(session_dir.glob("*.md"))):
+        metadata_path = session_dir / (md_file.name + ".metadata")
+        url = None
+        if metadata_path.exists():
+            try:
+                meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+                url = meta.get("url")
+            except Exception:
+                pass
+        pages.append(
+            {
+                "id": idx,
+                "filename": md_file.name,
+                "url": url,
+                "check_status": None,
+                "result": None,
+                "error": None,
+            }
+        )
+
+    if not pages:
+        raise HTTPException(status_code=400, detail="No pages found in collection")
+
+    analysis_jobs[_job_key(x_session_id, "compliance")] = {
+        "session_id": x_session_id,
+        "status": "pages_ready",
+        "pages": pages,
+        "created_at": time.time(),
+        "error": None,
+    }
+
+    logger.info(
+        f"Compliance analysis started for session {x_session_id[:8]}...: {len(pages)} page(s)"
+    )
+    return {"status": "started", "page_count": len(pages)}
+
+
+@app.get("/api/analysis/compliance")
+@limiter.limit("30/minute")
+async def get_compliance_analysis(
+    request: Request,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+) -> dict:
+    """Poll the status and results of the compliance analysis."""
+    validate_session(x_session_id, request)
+
+    job = analysis_jobs.get(_job_key(x_session_id, "compliance"))
+    if job is None:
+        raise HTTPException(status_code=404, detail="No compliance job found")
+
+    return {"status": job["status"], "pages": job["pages"], "error": job["error"]}
+
+
+class BatchPageCheckRequest(BaseModel):
+    page_ids: List[int]
+
+
+@app.post("/api/analysis/compliance/pages/check-all")
+@limiter.limit("5/minute")
+async def check_all_pages(
+    request: Request,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+) -> dict:
+    """Trigger compliance checks for all unchecked or errored pages."""
+    validate_session(x_session_id, request)
+    job = _get_compliance_ready_job(x_session_id)
+
+    started = []
+    for page in job["pages"]:
+        if page.get("check_status") in (None, "error"):
+            page["check_status"] = "checking"
+            asyncio.create_task(_run_page_check(x_session_id, page["id"]))
+            started.append(page["id"])
+
+    logger.info(
+        f"Compliance check-all for session {x_session_id[:8]}...: {len(started)} page(s)"
+    )
+    return {"message": f"Started {len(started)} checks", "started": started}
+
+
+@app.post("/api/analysis/compliance/pages/check-batch")
+@limiter.limit("10/minute")
+async def check_pages_batch(
+    request: Request,
+    body: BatchPageCheckRequest,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+) -> dict:
+    """Trigger parallel compliance checks for a batch of pages."""
+    validate_session(x_session_id, request)
+    job = _get_compliance_ready_job(x_session_id)
+
+    if len(body.page_ids) > 25:
+        raise HTTPException(status_code=400, detail="Maximum 25 pages per batch")
+
+    started = []
+    for page_id in body.page_ids:
+        page = next((p for p in job["pages"] if p["id"] == page_id), None)
+        if page is None or page.get("check_status") in ("checking", "complete"):
+            continue
+        page["check_status"] = "checking"
+        asyncio.create_task(_run_page_check(x_session_id, page_id))
+        started.append(page_id)
+
+    logger.info(
+        f"Compliance batch check for session {x_session_id[:8]}...: {len(started)} page(s)"
+    )
+    return {"message": f"Started {len(started)} checks", "started": started}
+
+
+@app.post("/api/analysis/compliance/pages/{page_id}/check")
+@limiter.limit("20/minute")
+async def check_page(
+    request: Request,
+    page_id: int,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+) -> dict:
+    """Trigger a compliance check for a specific page."""
+    validate_session(x_session_id, request)
+    job = _get_compliance_ready_job(x_session_id)
+
+    page = next((p for p in job["pages"] if p["id"] == page_id), None)
+    if page is None:
+        raise HTTPException(status_code=404, detail="Page not found")
+    if page.get("check_status") in ("checking", "complete"):
+        return {"message": "Already checking or complete"}
+
+    page["check_status"] = "checking"
+    asyncio.create_task(_run_page_check(x_session_id, page_id))
+    logger.info(
+        f"Compliance page check triggered: session {x_session_id[:8]}... page {page_id}"
+    )
+    return {"message": "Check started"}
+
+
+async def _run_page_check(session_id: str, page_id: int) -> None:
+    """Background task: run LLM compliance check for a single page."""
+    key = _job_key(session_id, "compliance")
+    try:
+        job = analysis_jobs[key]
+        page = next(p for p in job["pages"] if p["id"] == page_id)
+        session_dir = DATA_DIR / session_id
+        content = (session_dir / page["filename"]).read_text(encoding="utf-8")
+        guidelines = _db_get_compliance_guidelines(session_id)
+        if not guidelines:
+            raise ValueError("Compliance guidelines have been cleared")
+        async with _get_llm_semaphore():
+            result: ComplianceResult = await check_page_compliance(
+                page["filename"], content, guidelines
+            )
+        page["check_status"] = "complete"
+        page["result"] = result.model_dump()
+        logger.info(
+            f"Compliance check complete: {key[:16]}... page {page_id}: "
+            f"{'issues found' if result.has_issues else 'no issues'}"
+        )
+    except Exception as exc:
+        logger.exception(f"Compliance check failed: {key[:16]}... page {page_id}")
+        try:
+            for p in analysis_jobs[key]["pages"]:
+                if p["id"] == page_id:
+                    p["check_status"] = "error"
+                    p["error"] = str(exc)
+                    break
+        except KeyError:
+            pass

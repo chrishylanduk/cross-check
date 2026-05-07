@@ -1,7 +1,9 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useRouter } from 'next/router'
+import { usePolling } from '@/hooks/usePolling'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000'
+const POLL_INTERVAL_MS = 5000
 
 interface SessionData {
   fileCount: number
@@ -10,11 +12,33 @@ interface SessionData {
   finalised: boolean
 }
 
+function sumIssues(modules: Record<string, { issue_count: number }>): number {
+  return Object.values(modules).reduce((sum, m) => sum + m.issue_count, 0)
+}
+
 export default function SessionBanner() {
   const router = useRouter()
   const [session, setSession] = useState<SessionData | null>(null)
+  const [finalised, setFinalised] = useState(false)
+  const { schedule, cancel } = usePolling(POLL_INTERVAL_MS)
+  const startedRef = useRef(false)
+
+  const pollIssues = useCallback(async (headers: Record<string, string>) => {
+    try {
+      const issues = await fetch(`${API_BASE}/api/issues`, { headers }).then((r) => (r.ok ? r.json() : null))
+      if (issues) {
+        setSession((prev) => prev ? { ...prev, issueCount: sumIssues(issues.modules) } : prev)
+      }
+      schedule(() => pollIssues(headers))
+    } catch {
+      // Silently ignore poll failures
+    }
+  }, [schedule])
 
   useEffect(() => {
+    if (startedRef.current) return
+    startedRef.current = true
+
     const sessionId = sessionStorage.getItem('cross-check-session-id')
     const expiresAt = sessionStorage.getItem('cross-check-expires-at')
     if (!sessionId || !expiresAt) return
@@ -31,20 +55,22 @@ export default function SessionBanner() {
       fetch(`${API_BASE}/api/issues`, { headers }).then((r) => (r.ok ? r.json() : null)),
     ]).then(([collection, issues]) => {
       if (!collection) return
-      const issueCount = issues
-        ? Object.values(issues.modules as Record<string, { issue_count: number }>).reduce(
-            (sum, m) => sum + m.issue_count,
-            0,
-          )
-        : 0
+      const isFinalised = collection.finalised
+      const issueCount = issues ? sumIssues(issues.modules) : 0
+      setFinalised(isFinalised)
       setSession({
         fileCount: collection.file_count,
-        issueCount: collection.finalised ? issueCount : null,
+        issueCount: isFinalised ? issueCount : null,
         expiresAt: Number(expiresAt),
-        finalised: collection.finalised,
+        finalised: isFinalised,
       })
+      if (isFinalised) {
+        schedule(() => pollIssues(headers))
+      }
     }).catch(() => {})
-  }, [])
+
+    return () => cancel()
+  }, [schedule, cancel, pollIssues])
 
   if (!session) return null
 
@@ -81,7 +107,7 @@ export default function SessionBanner() {
           <a href="/upload" className="govuk-link govuk-link--no-visited-state">
             View files ({session.fileCount})
           </a>
-          {session.finalised && (
+          {finalised && (
             <a href="/issues" className="govuk-link govuk-link--no-visited-state">
               View issues ({session.issueCount ?? 0})
             </a>

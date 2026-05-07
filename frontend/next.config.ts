@@ -1,5 +1,19 @@
 import type { NextConfig } from 'next'
 
+const apiBase = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000'
+
+const csp = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self'",
+  `connect-src 'self' ${apiBase}`,
+  "frame-src 'none'",
+  "object-src 'none'",
+  "base-uri 'self'",
+].join('; ')
+
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   // Enable standalone output for optimised Docker builds
@@ -11,6 +25,10 @@ const nextConfig: NextConfig = {
       {
         source: '/:path*',
         headers: [
+          {
+            key: 'Content-Security-Policy',
+            value: csp,
+          },
           {
             key: 'X-DNS-Prefetch-Control',
             value: 'on',

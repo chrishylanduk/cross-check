@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { displayFilename } from '@/lib/filename'
 
 interface MarkdownViewModalProps {
   filename: string
@@ -81,7 +82,7 @@ export default function MarkdownViewModal({
             className="govuk-heading-m"
             style={{ margin: 0, wordBreak: 'break-all' }}
           >
-            {filename}
+            {displayFilename(filename)}
           </h2>
           <button
             ref={closeButtonRef}

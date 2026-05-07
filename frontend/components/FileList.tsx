@@ -1,3 +1,5 @@
+import { displayFilename } from '@/lib/filename'
+
 interface FileItem {
   name: string
   size: number
@@ -116,7 +118,7 @@ export default function FileList({
         <tbody className="govuk-table__body">
           {files.map((file, index) => (
             <tr key={index} className="govuk-table__row">
-              <td className="govuk-table__cell">{file.name}</td>
+              <td className="govuk-table__cell">{displayFilename(file.name)}</td>
               <td className="govuk-table__cell govuk-table__cell--numeric">
                 {formatBytes(file.size)}
               </td>
@@ -127,7 +129,7 @@ export default function FileList({
                   onClick={() => onViewFile(file.name)}
                   style={{ border: 'none', background: 'none', cursor: 'pointer' }}
                 >
-                  View<span className="govuk-visually-hidden"> {file.name}</span>
+                  View<span className="govuk-visually-hidden"> {displayFilename(file.name)}</span>
                 </button>
                 {!finalised && (
                   <>
@@ -138,7 +140,7 @@ export default function FileList({
                       onClick={() => onDelete(file.name)}
                       style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#d4351c' }}
                     >
-                      Delete<span className="govuk-visually-hidden"> {file.name}</span>
+                      Delete<span className="govuk-visually-hidden"> {displayFilename(file.name)}</span>
                     </button>
                   </>
                 )}
