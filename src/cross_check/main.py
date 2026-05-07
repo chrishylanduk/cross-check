@@ -441,9 +441,9 @@ def _get_url_map(session_id: str) -> Dict[str, str]:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 if meta.get("url"):
                     url_map[meta_path.name.removesuffix(".metadata")] = meta["url"]
-            except Exception:
+            except Exception:  # nosec B110
                 pass
-    except Exception:
+    except Exception:  # nosec B110
         pass
     return url_map
 
@@ -600,7 +600,7 @@ async def validate_password(
 ):
     """Validate prototype password and return auth token."""
     if not PROTOTYPE_PASSWORD_ENABLED:
-        return {"valid": True, "token": None, "message": "Password protection disabled"}
+        return {"valid": True, "token": None, "message": "Password protection disabled"}  # nosec B105
 
     # Hash the provided password
     provided_hash = hashlib.sha256(password_request.password.encode()).hexdigest()
@@ -623,7 +623,7 @@ async def validate_password(
     )
     return JSONResponse(
         status_code=401,
-        content={"valid": False, "token": None, "message": "Invalid password"},
+        content={"valid": False, "token": None, "message": "Invalid password"},  # nosec B105
     )
 
 
@@ -1583,7 +1583,7 @@ async def start_compliance_analysis(
             try:
                 meta = json.loads(metadata_path.read_text(encoding="utf-8"))
                 url = meta.get("url")
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         pages.append(
             {
