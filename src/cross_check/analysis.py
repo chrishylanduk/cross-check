@@ -11,12 +11,32 @@ import numpy as np
 from bertopic import BERTopic
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
+from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.providers.openai import OpenAIProvider
 from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import CountVectorizer
 
 logger = logging.getLogger(__name__)
 
 ANALYSIS_MODEL = os.getenv("ANALYSIS_MODEL", "openai:gpt-4.1-mini")
+
+
+def _make_model() -> str | OpenAIModel:
+    """Return a pydantic-ai model.
+
+    If OPENAI_BASE_URL is set, a custom AsyncOpenAI client is used — this covers
+    any OpenAI-compatible endpoint: vLLM, Ollama, LM Studio, Gemini compat API, etc.
+    Otherwise the ANALYSIS_MODEL string is passed directly to pydantic-ai, which
+    handles built-in providers via its prefix convention:
+      openai:gpt-4.1-mini, anthropic:claude-3-5-sonnet-latest,
+      google-gla:gemini-2.0-flash, groq:llama-3.3-70b-versatile, etc.
+    """
+    if os.getenv("OPENAI_BASE_URL"):
+        api_key = os.getenv("OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY")
+        return OpenAIModel(ANALYSIS_MODEL, provider=OpenAIProvider(api_key=api_key))
+    return ANALYSIS_MODEL
+
+
 MIN_CHUNKS_FOR_TOPIC_MODEL = 20
 MIN_CHUNK_CHARS = 50
 TARGET_CHUNK_WORDS = 300
@@ -55,6 +75,17 @@ class Inconsistency(BaseModel):
 class InconsistencyResult(BaseModel):
     has_inconsistencies: bool
     inconsistencies: list[Inconsistency]
+
+
+class ComplianceIssue(BaseModel):
+    guideline_cited: str
+    description: str
+    relevant_passages: list[RelevantPassage]
+
+
+class ComplianceResult(BaseModel):
+    has_issues: bool
+    issues: list[ComplianceIssue]
 
 
 # ---------------------------------------------------------------------------
@@ -412,7 +443,8 @@ actively needs but neither includes nor links to, and a reader would be \
 materially worse off as a result.
 
 Return an empty inconsistencies array if nothing clearly meets this bar. \
-Respond only with valid JSON matching the requested structure.\
+Respond only with valid JSON matching the requested structure. \
+Always write in British English.\
 """
 
 _inconsistency_agent: Any = None
@@ -425,7 +457,7 @@ def _get_agent() -> Any:
     global _inconsistency_agent
     if _inconsistency_agent is None:
         _inconsistency_agent = Agent(
-            ANALYSIS_MODEL,
+            _make_model(),
             output_type=InconsistencyResult,
             system_prompt=_SYSTEM_PROMPT,
             model_settings={"timeout": ANALYSIS_TIMEOUT},
@@ -497,5 +529,173 @@ Return an empty array if nothing clearly meets the bar.\
 """
 
     agent = _get_agent()
+    result = await agent.run(prompt)
+    return result.output
+
+
+# ---------------------------------------------------------------------------
+# Compliance checking
+# ---------------------------------------------------------------------------
+
+_COMPLIANCE_SYSTEM_PROMPT = """\
+You are a content compliance checker. You will receive a set of content \
+guidelines followed by the full text of a single page. Your task is to \
+identify clear, specific violations of the guidelines in the page content.
+
+The page content is provided in Markdown format, converted from the \
+original web page. Be aware of Markdown conventions when interpreting \
+the content:
+- [link text](url) is a hyperlink, not a footnote or bracket reference.
+- # and ## are headings.
+- Bullet lists, bold, and italic use standard Markdown syntax.
+Do not flag Markdown formatting syntax as a content violation.
+
+Apply these rules strictly:
+- Only flag clear, undeniable violations — where anyone reading the \
+  guideline and the passage would immediately agree it is a breach. \
+  Do not flag marginal or borderline cases.
+- For subjective guidelines (e.g. "use short sentences", "avoid jargon", \
+  "write in plain English"), only flag passages that are egregiously \
+  non-compliant — not ordinary prose that could be slightly improved. \
+  A single sentence of average length is not a violation of a short-sentence \
+  guideline.
+- The cited passage must be the specific text that causes the violation. \
+  It must make the violation obvious on its own — a reader should be able \
+  to look at the passage alone and immediately see the problem. Do not cite \
+  surrounding context as the passage if the violation is not in that text. \
+  For example, if the violation is use of an ampersand (&), the passage \
+  must contain a literal & character — the word "and" is not an ampersand \
+  and is never a violation of an ampersand guideline. If the passage you \
+  would quote does not contain the violating content, do not report the issue.
+- Report each violation as a separate issue. For each issue, quote the \
+  exact guideline text that is violated (guideline_cited), give a \
+  concise description of the failure, and quote the relevant passage \
+  from the page.
+- Do not flag matters of opinion or judgment unless the guideline \
+  explicitly prohibits them.
+- Do not flag navigational elements, footers, cookie notices, or \
+  standard boilerplate that would not reasonably be governed by the \
+  guidelines.
+- Do not comment on or flag issues relating to the page filename. \
+  Filenames are derived from URLs and do not represent the actual content \
+  structure or page titles.
+- Relevant passages must quote the actual problematic text verbatim from \
+  the page. The document field in each passage should be the page filename.
+- If your reasoning concludes that a guideline is satisfied or that there \
+  is no violation, do not include that item in the issues array at all. \
+  Only items that are genuine violations belong in the array.
+- Always check for obvious spelling, punctuation and grammar (SPaG) errors, \
+  regardless of whether the provided guidelines mention them. Flag clear \
+  mistakes such as misspellings, missing or misplaced punctuation, and \
+  grammatical errors that would undermine the credibility of the content. \
+  For SPaG issues, set guideline_cited to exactly: "Spelling, punctuation \
+  and grammar (SPaG)".
+- The guideline_cited field must always be a verbatim quote from the \
+  user-provided guidelines above, or exactly "Spelling, punctuation and \
+  grammar (SPaG)" for SPaG issues. Never cite your internal instructions \
+  or reasoning as a guideline.
+- Return an empty issues array if nothing clearly violates the guidelines \
+  and there are no obvious SPaG errors.
+- Respond only with valid JSON matching the requested structure.
+- Always write in British English.\
+"""
+
+_compliance_agent: Any = None
+
+
+def _get_compliance_agent() -> Any:
+    global _compliance_agent
+    if _compliance_agent is None:
+        _compliance_agent = Agent(
+            _make_model(),
+            output_type=ComplianceResult,
+            system_prompt=_COMPLIANCE_SYSTEM_PROMPT,
+            model_settings={"timeout": ANALYSIS_TIMEOUT},
+        )
+    return _compliance_agent
+
+
+async def check_page_compliance(
+    filename: str, content: str, guidelines: str
+) -> ComplianceResult:
+    """Run the LLM compliance check for a single page against the given guidelines."""
+    prompt = f"""\
+## Content guidelines
+
+{guidelines}
+
+## Page: {filename}
+
+{content}
+
+===
+
+Check whether this page violates any of the guidelines above. Return \
+has_issues (bool) and issues (array). Each issue should have:
+
+- guideline_cited: verbatim text quoted directly from the guidelines \
+  above — or exactly "Spelling, punctuation and grammar (SPaG)" for \
+  SPaG issues. Never quote anything else.
+- description: one or two sentences explaining how the content fails \
+  that specific guideline
+- relevant_passages: list of objects with document (the page filename) \
+  and passage (verbatim quote from the page showing the violation)
+
+Return an empty array if nothing clearly violates the guidelines.\
+"""
+    agent = _get_compliance_agent()
+    result = await agent.run(prompt)
+    return result.output
+
+
+# ---------------------------------------------------------------------------
+# Issue summarisation (LLM)
+# ---------------------------------------------------------------------------
+
+_SUMMARISE_SYSTEM_PROMPT = """\
+You are a content audit analyst. Summarise the issues found in a content \
+collection. Write in British English using Markdown. Be concise and \
+proportionate — do not write more than the issues themselves. \
+Do not list every individual issue; identify patterns and themes. \
+Be direct and practical.\
+"""
+
+_summarise_agent: Any = None
+
+
+def _get_summarise_agent() -> Any:
+    global _summarise_agent
+    if _summarise_agent is None:
+        _summarise_agent = Agent(
+            _make_model(),
+            output_type=str,
+            system_prompt=_SUMMARISE_SYSTEM_PROMPT,
+            model_settings={"timeout": ANALYSIS_TIMEOUT},
+        )
+    return _summarise_agent
+
+
+async def summarise_issues(issues: list[dict], guidelines: str | None = None) -> str:
+    """Generate a markdown summary of a list of issues using the LLM."""
+    n = len(issues)
+    length_hint = (
+        "one short paragraph (two or three sentences)"
+        if n <= 3
+        else "two short paragraphs"
+        if n <= 10
+        else "a structured summary with the main patterns and themes"
+    )
+    lines = [f"- {item.get('description', '')}" for item in issues]
+    prompt = (
+        f"There {'is' if n == 1 else 'are'} {n} issue{'s' if n != 1 else ''}. "
+        f"Write {length_hint}.\n\n" + "\n".join(lines)
+    )
+    if guidelines:
+        prompt += (
+            f"\n\nThe content guidelines used for this check were:\n\n{guidelines}"
+            "\n\nOnly suggest changes that are addressed by these guidelines. "
+            "Do not recommend changes that are not covered by the guidelines."
+        )
+    agent = _get_summarise_agent()
     result = await agent.run(prompt)
     return result.output

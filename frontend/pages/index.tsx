@@ -56,7 +56,7 @@ export default function Home() {
       <h1 className="govuk-heading-xl">Cross-check</h1>
           <p className="govuk-body-l">
             Automatically recommend improvements to a large collection of written content (such as a
-            website or intranet) to improve its consistency, clarity, compliance and completeness.
+            website or intranet) to improve its consistency, compliance and completeness.
           </p>
           <p className="govuk-body">Save hours or days compared to a manual content audit.</p>
 

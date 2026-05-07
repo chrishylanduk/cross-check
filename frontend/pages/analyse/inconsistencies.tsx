@@ -1,9 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { displayFilename } from '@/lib/filename'
 import Head from 'next/head'
 import Link from 'next/link'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import Layout from '@/components/Layout'
+import { usePolling } from '@/hooks/usePolling'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000'
 const POLL_INTERVAL_MS = 2000
@@ -46,6 +48,7 @@ interface JobState {
   status: 'discovering' | 'topics_ready' | 'error'
   topics: Topic[]
   error: string | null
+  url_map?: Record<string, string>
 }
 
 function getAuthHeaders(): Record<string, string> {
@@ -58,7 +61,7 @@ function getAuthHeaders(): Record<string, string> {
   }
 }
 
-function InconsistencyDetail({ item }: { item: Inconsistency }) {
+function InconsistencyDetail({ item, urlMap }: { item: Inconsistency; urlMap: Record<string, string> }) {
   const [expanded, setExpanded] = useState(false)
   const typeLabel = item.type === 'contradiction' ? 'Contradiction' : 'Uneven coverage'
 
@@ -71,7 +74,7 @@ function InconsistencyDetail({ item }: { item: Inconsistency }) {
         {item.description}
       </p>
       <p className="govuk-body-s" style={{ color: '#505a5f', marginBottom: '4px' }}>
-        Documents involved: {item.documents_involved.join(', ')}
+        Documents involved: {item.documents_involved.map(displayFilename).join(', ')}
       </p>
       {item.relevant_passages.length > 0 && (
         <button
@@ -94,8 +97,13 @@ function InconsistencyDetail({ item }: { item: Inconsistency }) {
                 marginBottom: '8px',
               }}
             >
-              <p className="govuk-body-s" style={{ marginBottom: '2px', color: '#505a5f' }}>
-                <strong>{p.document}</strong>
+              <p className="govuk-body-s" style={{ marginBottom: '2px', color: '#505a5f', display: 'flex', gap: '8px', alignItems: 'baseline' }}>
+                <strong>{displayFilename(p.document)}</strong>
+                {urlMap[p.document] && (
+                  <a href={urlMap[p.document]} target="_blank" rel="noopener noreferrer" className="govuk-link govuk-link--no-visited-state">
+                    View live version
+                  </a>
+                )}
               </p>
               <div className="govuk-body-s passage-markdown" style={{ margin: 0, fontStyle: 'italic' }}>
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{p.passage}</ReactMarkdown>
@@ -111,9 +119,11 @@ function InconsistencyDetail({ item }: { item: Inconsistency }) {
 function TopicRow({
   topic,
   onCheck,
+  urlMap,
 }: {
   topic: Topic
   onCheck: (topicId: number) => void
+  urlMap: Record<string, string>
 }) {
   const [showResults, setShowResults] = useState(false)
   const [showChunks, setShowChunks] = useState(false)
@@ -203,8 +213,13 @@ function TopicRow({
                   marginBottom: '16px',
                 }}
               >
-                <p className="govuk-body-s" style={{ marginBottom: '4px', color: '#505a5f' }}>
-                  <strong>{chunk.source_file}</strong>
+                <p className="govuk-body-s" style={{ marginBottom: '4px', color: '#505a5f', display: 'flex', gap: '8px', alignItems: 'baseline' }}>
+                  <strong>{displayFilename(chunk.source_file)}</strong>
+                  {urlMap[chunk.source_file] && (
+                    <a href={urlMap[chunk.source_file]} target="_blank" rel="noopener noreferrer" className="govuk-link govuk-link--no-visited-state">
+                      View live version
+                    </a>
+                  )}
                 </p>
                 <div className="govuk-body-s passage-markdown" style={{ margin: 0 }}>
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{chunk.text}</ReactMarkdown>
@@ -228,7 +243,7 @@ function TopicRow({
               </p>
             ) : (
               topic.result!.inconsistencies.map((item, i) => (
-                <InconsistencyDetail key={i} item={item} />
+                <InconsistencyDetail key={i} item={item} urlMap={urlMap} />
               ))
             )}
           </td>
@@ -242,7 +257,7 @@ export default function Inconsistencies() {
   const [job, setJob] = useState<JobState | null>(null)
   const [startError, setStartError] = useState<string | null>(null)
   const startedRef = useRef(false)
-  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const { schedule, cancel } = usePolling(POLL_INTERVAL_MS)
 
   const pollJob = useCallback(async () => {
     try {
@@ -257,17 +272,17 @@ export default function Inconsistencies() {
       setJob(data)
 
       if (data.status === 'discovering') {
-        pollRef.current = setTimeout(pollJob, POLL_INTERVAL_MS)
+        schedule(pollJob)
       } else {
         const anyChecking = data.topics.some((t) => t.check_status === 'checking')
         if (anyChecking) {
-          pollRef.current = setTimeout(pollJob, POLL_INTERVAL_MS)
+          schedule(pollJob)
         }
       }
     } catch {
       setJob({ status: 'error', topics: [], error: 'Network error. Please try again.' })
     }
-  }, [])
+  }, [schedule])
 
   // On mount: try to resume an existing job, otherwise start a new one
   useEffect(() => {
@@ -290,7 +305,7 @@ export default function Inconsistencies() {
           setJob(data)
           const anyChecking = data.topics.some((t) => t.check_status === 'checking')
           if (data.status === 'discovering' || anyChecking) {
-            pollRef.current = setTimeout(pollJob, POLL_INTERVAL_MS)
+            schedule(pollJob)
           }
           return
         }
@@ -318,10 +333,8 @@ export default function Inconsistencies() {
 
     startAnalysis()
 
-    return () => {
-      if (pollRef.current) clearTimeout(pollRef.current)
-    }
-  }, [pollJob])
+    return () => cancel()
+  }, [pollJob, schedule, cancel])
 
   const handleCheckBatch = async () => {
     if (!job) return
@@ -352,8 +365,7 @@ export default function Inconsistencies() {
       // Polling will surface any errors
     }
 
-    if (pollRef.current) clearTimeout(pollRef.current)
-    pollRef.current = setTimeout(pollJob, POLL_INTERVAL_MS)
+    schedule(pollJob)
   }
 
   const handleCheckAll = async () => {
@@ -381,8 +393,7 @@ export default function Inconsistencies() {
       // Polling will surface any errors
     }
 
-    if (pollRef.current) clearTimeout(pollRef.current)
-    pollRef.current = setTimeout(pollJob, POLL_INTERVAL_MS)
+    schedule(pollJob)
   }
 
   const handleCheck = async (topicId: number) => {
@@ -406,8 +417,7 @@ export default function Inconsistencies() {
       // Polling will surface any errors
     }
 
-    if (pollRef.current) clearTimeout(pollRef.current)
-    pollRef.current = setTimeout(pollJob, POLL_INTERVAL_MS)
+    schedule(pollJob)
   }
 
   return (
@@ -518,7 +528,7 @@ export default function Inconsistencies() {
               </thead>
               <tbody className="govuk-table__body">
                 {job.topics.map((topic) => (
-                  <TopicRow key={topic.id} topic={topic} onCheck={handleCheck} />
+                  <TopicRow key={topic.id} topic={topic} onCheck={handleCheck} urlMap={job.url_map ?? {}} />
                 ))}
               </tbody>
             </table>
