@@ -10,7 +10,6 @@ function clearSession() {
   sessionStorage.removeItem('cross-check-expires-at')
   sessionStorage.removeItem('cross-check-has-files')
   sessionStorage.removeItem('cross-check-finalised')
-  sessionStorage.removeItem('cross-check-job-id')
 }
 
 export default function Home() {
@@ -54,9 +53,7 @@ export default function Home() {
         />
       </Head>
 
-      <div className="govuk-grid-row">
-        <div className="govuk-grid-column-two-thirds">
-          <h1 className="govuk-heading-xl">Cross-check</h1>
+      <h1 className="govuk-heading-xl">Cross-check</h1>
           <p className="govuk-body-l">
             Automatically recommend improvements to a large collection of written content (such as a
             website or intranet) to improve its consistency, clarity, compliance and completeness.
@@ -83,8 +80,6 @@ export default function Home() {
               <path fill="currentColor" d="M0 0h13l20 20-20 20H0l20-20z" />
             </svg>
           </a>
-        </div>
-      </div>
     </Layout>
   )
 }

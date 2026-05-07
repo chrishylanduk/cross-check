@@ -8,7 +8,7 @@ import MarkdownViewModal from '@/components/MarkdownViewModal'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000'
 const MAX_FILE_SIZE = 50 * 1024 * 1024 // 50MB
-const MAX_FILES = 100
+const MAX_FILES = 5000
 
 interface FileInfo {
   name: string
@@ -189,7 +189,7 @@ export default function Upload() {
         sessionStorage.removeItem('cross-check-expires-at')
         sessionStorage.removeItem('cross-check-finalised')
         sessionStorage.removeItem('cross-check-has-files')
-        sessionStorage.removeItem('cross-check-job-id')
+
         initialisingRef.current = false
         setSessionId(null)
         setExpiresAt(null)
@@ -210,7 +210,7 @@ export default function Upload() {
           sessionStorage.removeItem('cross-check-session-id')
           sessionStorage.removeItem('cross-check-expires-at')
           sessionStorage.removeItem('cross-check-has-files')
-          sessionStorage.removeItem('cross-check-job-id')
+
           initialisingRef.current = false
           setSessionId(null)
           setExpiresAt(null)
@@ -389,9 +389,7 @@ export default function Upload() {
         <title>Upload content - Cross-check</title>
       </Head>
 
-      <div className="govuk-grid-row">
-        <div className="govuk-grid-column-two-thirds">
-          <h1 className="govuk-heading-xl">Upload content files</h1>
+      <h1 className="govuk-heading-xl">Upload content files</h1>
 
           {!dataUsageAccepted ? (
             <DataUsageNotice onAccept={() => setDataUsageAccepted(true)} />
@@ -615,8 +613,6 @@ export default function Upload() {
               )}
             </>
           )}
-        </div>
-      </div>
     </Layout>
   )
 }
