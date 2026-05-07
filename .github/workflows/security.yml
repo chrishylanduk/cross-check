@@ -61,7 +61,7 @@ jobs:
       - name: Run pip-audit
         run: |
           pip install pip-audit
-          uv export --no-dev --format requirements-txt > /tmp/requirements.txt
+          uv export --no-dev --no-emit-project --format requirements-txt > /tmp/requirements.txt
           pip-audit -r /tmp/requirements.txt
 
   # ── Frontend dependency audit ──────────────────────────────────────────────
