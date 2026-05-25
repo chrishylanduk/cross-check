@@ -3,6 +3,8 @@
 import asyncio
 import base64
 import hashlib
+import httpx
+import io
 import json
 import logging
 import mimetypes
@@ -12,7 +14,9 @@ import secrets
 import sqlite3
 import sys
 import time
+import tomllib
 import urllib.parse
+import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -42,6 +46,7 @@ from .analysis import (
     check_topic_inconsistencies,
     chunk_documents,
     embed_chunks,
+    get_embedding_model,
     run_topic_model,
     summarise_issues,
 )
@@ -258,6 +263,14 @@ async def lifespan(app: FastAPI):
     logger.info(f"Active sessions: {active}")
 
     cleanup_orphaned_files()
+
+    # Pre-warm the embedding model so it is loaded into memory before the first request
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, get_embedding_model)
+
+    # Cache demo files to disk so they are served instantly without a B2 round-trip
+    if B2_DEMO_ENABLED:
+        await _warm_demo_cache()
 
     # Start background eviction loop
     asyncio.create_task(session_cleanup_loop())
@@ -550,6 +563,12 @@ md_converter = MarkItDown()
 
 
 MAX_FOOTER_CUTOFF_LENGTH = 500
+
+
+def _is_ignored_path(name: str) -> bool:
+    """Return True for macOS metadata entries and hidden files/directories."""
+    parts = name.replace("\\", "/").split("/")
+    return any(p.startswith(".") or p == "__MACOSX" for p in parts if p)
 
 
 def _strip_before_first_h1(content: str) -> str:
@@ -847,6 +866,9 @@ async def upload_files(
 
     for file in files:
         if not file.filename:
+            continue
+
+        if _is_ignored_path(file.filename):
             continue
 
         logger.info(f"Processing file: {file.filename}")
@@ -1235,6 +1257,261 @@ async def finalise_collection(
         "message": "Collection finalised successfully",
         "finalised": True,
         "file_count": file_count,
+    }
+
+
+# ---------------------------------------------------------------------------
+# B2 demo integration
+# ---------------------------------------------------------------------------
+
+B2_KEY_ID = os.getenv("B2_KEY_ID", "")
+B2_APPLICATION_KEY = os.getenv("B2_APPLICATION_KEY", "")
+B2_BUCKET_NAME = os.getenv("B2_BUCKET_NAME", "")
+B2_DEMO_ENABLED = bool(B2_KEY_ID and B2_APPLICATION_KEY and B2_BUCKET_NAME)
+
+_B2_API_URL = "https://api.backblazeb2.com"
+_B2_DEMO_CONFIG = "demo.toml"
+
+_DEMO_CACHE_DIR = _DATA_ROOT / "demo_cache"
+_DEMO_ZIP_CACHE = _DEMO_CACHE_DIR / "demo.zip"
+_DEMO_TOML_CACHE = _DEMO_CACHE_DIR / "demo.toml"
+
+
+async def _b2_authorize(client: httpx.AsyncClient) -> dict:
+    resp = await client.get(
+        f"{_B2_API_URL}/b2api/v2/b2_authorize_account",
+        auth=(B2_KEY_ID, B2_APPLICATION_KEY),
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _b2_download(client: httpx.AsyncClient, auth: dict, file_name: str) -> bytes:
+    resp = await client.get(
+        f"{auth['downloadUrl']}/file/{B2_BUCKET_NAME}/{urllib.parse.quote(file_name, safe='/')}",
+        headers={"Authorization": auth["authorizationToken"]},
+        timeout=120,
+    )
+    resp.raise_for_status()
+    return resp.content
+
+
+async def _warm_demo_cache() -> None:
+    """Download demo files from B2 and cache to disk for fast subsequent loads."""
+    _DEMO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        async with httpx.AsyncClient() as client:
+            auth = await _b2_authorize(client)
+            try:
+                toml_bytes = await _b2_download(client, auth, _B2_DEMO_CONFIG)
+                _DEMO_TOML_CACHE.write_bytes(toml_bytes)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    _DEMO_TOML_CACHE.unlink(missing_ok=True)
+                else:
+                    raise
+            zip_bytes = await _b2_download(client, auth, "demo.zip")
+            _DEMO_ZIP_CACHE.write_bytes(zip_bytes)
+        logger.info(f"Demo cache ready ({_DEMO_ZIP_CACHE.stat().st_size // 1024} KB)")
+    except Exception as exc:
+        logger.warning(
+            f"Demo cache warm failed: {exc} — files will be fetched from B2 on demand"
+        )
+
+
+@app.post("/api/demo/load")
+@limiter.limit("3/minute")
+async def load_demo_files(
+    request: Request,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+):
+    """Download demo.zip from B2, unzip it, and add files to the session collection."""
+    if not B2_DEMO_ENABLED:
+        raise HTTPException(status_code=404, detail="Demo files not configured")
+
+    validate_session(x_session_id, request)
+    session = _db_get_session(x_session_id)
+    if session and session["finalised"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Collection is finalised. Start a new session to load demo files.",
+        )
+
+    session_dir = DATA_DIR / x_session_id
+    current_usage = get_session_storage_usage(x_session_id)
+
+    strip_before_h1 = False
+    footer_cutoff = ""
+
+    if _DEMO_ZIP_CACHE.exists():
+        zip_bytes = _DEMO_ZIP_CACHE.read_bytes()
+        if _DEMO_TOML_CACHE.exists():
+            try:
+                config = tomllib.loads(_DEMO_TOML_CACHE.read_text("utf-8"))
+                strip_before_h1 = bool(config.get("strip_before_h1", False))
+                footer_cutoff = str(config.get("footer_cutoff", ""))[
+                    :MAX_FOOTER_CUTOFF_LENGTH
+                ]
+            except Exception:
+                pass
+    else:
+        # Cache not ready — fall back to fetching directly from B2
+        try:
+            async with httpx.AsyncClient() as client:
+                auth = await _b2_authorize(client)
+                try:
+                    config_bytes = await _b2_download(client, auth, _B2_DEMO_CONFIG)
+                    config = tomllib.loads(config_bytes.decode("utf-8"))
+                    strip_before_h1 = bool(config.get("strip_before_h1", False))
+                    footer_cutoff = str(config.get("footer_cutoff", ""))[
+                        :MAX_FOOTER_CUTOFF_LENGTH
+                    ]
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code != 404:
+                        logger.warning(f"Could not read {_B2_DEMO_CONFIG}: {e}")
+                except Exception:
+                    pass
+                zip_bytes = await _b2_download(client, auth, "demo.zip")
+        except httpx.HTTPStatusError as e:
+            logger.error(f"B2 request failed: {e}")
+            raise HTTPException(
+                status_code=502, detail="Failed to load demo files from storage"
+            )
+        except Exception as e:
+            logger.error(f"Demo load failed: {type(e).__name__}: {e}")
+            raise HTTPException(
+                status_code=502, detail="Failed to load demo files from storage"
+            )
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except zipfile.BadZipFile:
+        raise HTTPException(
+            status_code=502, detail="Demo archive is not a valid zip file"
+        )
+
+    saved_files = []
+    rejected_files = []
+    total_new_size = 0
+
+    for entry in zf.infolist():
+        if entry.is_dir():
+            continue
+
+        file_name = entry.filename
+        if _is_ignored_path(file_name):
+            continue
+
+        # Flatten path separators the same way as folder uploads
+        parts = [p for p in file_name.replace("\\", "/").split("/") if p]
+        joined = "-".join(parts) if len(parts) > 1 else file_name
+        safe_filename = sanitize_filename(joined)
+        if not safe_filename:
+            rejected_files.append({"name": file_name, "reason": "Invalid filename"})
+            continue
+
+        content = zf.read(entry)
+
+        if len(content) > MAX_FILE_SIZE:
+            rejected_files.append(
+                {"name": file_name, "reason": "File exceeds the 50MB size limit"}
+            )
+            continue
+
+        if current_usage + total_new_size + len(content) > MAX_STORAGE_PER_SESSION:
+            raise HTTPException(
+                status_code=507,
+                detail=f"Storage quota exceeded. Maximum {MAX_STORAGE_PER_SESSION // 1024 // 1024}MB per session",
+            )
+
+        # Detect MIME type (same logic as /api/upload)
+        kind = filetype.guess(content)
+        if kind is not None:
+            mime_type = kind.mime
+        else:
+            guessed_mime, _ = mimetypes.guess_type(file_name)
+            if guessed_mime is None:
+                rejected_files.append(
+                    {"name": file_name, "reason": "File type not recognised"}
+                )
+                continue
+            mime_type = guessed_mime
+
+        if mime_type not in ALLOWED_MIME_TYPES:
+            rejected_files.append(
+                {"name": file_name, "reason": "File type not supported"}
+            )
+            continue
+
+        temp_path = session_dir / f"temp_{secrets.token_hex(8)}_{safe_filename}"
+        try:
+            async with aiofiles.open(temp_path, "wb") as f:
+                await f.write(content)
+
+            result = md_converter.convert(str(temp_path))
+            markdown_content = result.text_content
+            markdown_content = markdown_content.replace(" ", " ")
+
+            if not markdown_content or not markdown_content.strip():
+                raise ValueError("Conversion produced empty content")
+
+            if mime_type == "text/html":
+                if strip_before_h1:
+                    markdown_content = _strip_before_first_h1(markdown_content)
+                if footer_cutoff:
+                    markdown_content = _strip_after_last_occurrence(
+                        markdown_content, footer_cutoff
+                    )
+
+            if not markdown_content or not markdown_content.strip():
+                rejected_files.append(
+                    {
+                        "name": file_name,
+                        "reason": "Processing options removed all content",
+                    }
+                )
+                continue
+
+            md_filename = safe_filename + ".md"
+            md_path = session_dir / md_filename
+
+            async with aiofiles.open(md_path, "w", encoding="utf-8") as f:
+                await f.write(markdown_content)
+
+            metadata: dict = {}
+            if mime_type == "text/html":
+                og_url = _extract_og_url(content)
+                if og_url:
+                    metadata["url"] = og_url
+            meta_path = session_dir / (md_filename + ".metadata")
+            async with aiofiles.open(meta_path, "w", encoding="utf-8") as f:
+                await f.write(json.dumps(metadata))
+
+            file_size = md_path.stat().st_size
+            total_new_size += file_size
+            saved_files.append({"name": md_filename, "size": file_size})
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            rejected_files.append(
+                {"name": file_name, "reason": f"Processing failed: {type(e).__name__}"}
+            )
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+
+    logger.info(
+        f"Demo load complete | Session: {x_session_id[:8]}... | "
+        f"Loaded: {len(saved_files)} | Rejected: {len(rejected_files)}"
+    )
+    return {
+        "file_count": len(saved_files),
+        "files": saved_files,
+        "rejected_files": rejected_files,
+        "storage_used": current_usage + total_new_size,
+        "storage_limit": MAX_STORAGE_PER_SESSION,
     }
 
 
