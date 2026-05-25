@@ -1,22 +1,10 @@
 import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server'
 import { NextResponse } from 'next/server'
+import { isEmailAllowed, parseAllowedDomains } from '@/lib/email-domain'
 
 const isPublicRoute = createRouteMatcher(['/sign-in(.*)', '/sign-up(.*)', '/access-denied'])
 
-const allowedDomains = (process.env.ALLOWED_EMAIL_DOMAINS ?? '')
-  .split(',')
-  .map((d) => d.trim().toLowerCase())
-  .filter(Boolean)
-
-function isEmailAllowed(email: string): boolean {
-  if (allowedDomains.length === 0) return true
-  const domain = email.split('@').pop()?.toLowerCase() ?? ''
-  return allowedDomains.some((allowed) =>
-    allowed.startsWith('@')
-      ? domain === allowed.slice(1)
-      : domain === allowed || domain.endsWith('.' + allowed)
-  )
-}
+const allowedDomains = parseAllowedDomains(process.env.ALLOWED_EMAIL_DOMAINS)
 
 export default clerkMiddleware(async (auth, req) => {
   if (!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY) return NextResponse.next()
@@ -34,7 +22,7 @@ export default clerkMiddleware(async (auth, req) => {
   if (allowedDomains.length > 0) {
     // Fail closed: if email is absent (e.g. not added to Clerk session token), deny access.
     const email = (sessionClaims as Record<string, unknown>)?.email as string | undefined
-    if (!email || !isEmailAllowed(email)) {
+    if (!email || !isEmailAllowed(email, allowedDomains)) {
       return NextResponse.redirect(new URL('/access-denied', req.url))
     }
   }
