@@ -110,3 +110,17 @@ repos:
         entry: bash -c 'cd frontend && npx tsc --noEmit'
         pass_filenames: false
         files: '^frontend/.*\.(ts|tsx)$'
+
+      - id: pytest
+        name: pytest - Python tests
+        language: system
+        entry: uv run pytest tests/
+        pass_filenames: false
+        files: '^(src/|tests/).*\.py$'
+
+      - id: vitest
+        name: vitest - Frontend tests
+        language: system
+        entry: bash -c 'cd frontend && npm test'
+        pass_filenames: false
+        files: '^frontend/(__tests__|lib|middleware).*\.(ts|tsx)$'
