@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { displayFilename } from '@/lib/filename'
+import { useAuthHeaders } from '@/contexts/AuthContext'
 import Head from 'next/head'
 import Link from 'next/link'
 import ReactMarkdown from 'react-markdown'
@@ -51,14 +52,17 @@ interface JobState {
   url_map?: Record<string, string>
 }
 
-function getAuthHeaders(): Record<string, string> {
-  const sessionId = sessionStorage.getItem('cross-check-session-id')
-  const authToken = sessionStorage.getItem('prototype-auth-token')
-  return {
-    'Content-Type': 'application/json',
-    ...(sessionId ? { 'X-Session-ID': sessionId } : {}),
-    ...(authToken ? { 'X-Prototype-Auth': authToken } : {}),
-  }
+function useHeaders() {
+  const getAuthHeaders = useAuthHeaders()
+  return useCallback(async () => {
+    const sessionId = sessionStorage.getItem('cross-check-session-id')
+    const auth = await getAuthHeaders()
+    return {
+      'Content-Type': 'application/json',
+      ...(sessionId ? { 'X-Session-ID': sessionId } : {}),
+      ...auth,
+    }
+  }, [getAuthHeaders])
 }
 
 function InconsistencyDetail({ item, urlMap }: { item: Inconsistency; urlMap: Record<string, string> }) {
@@ -258,11 +262,12 @@ export default function Inconsistencies() {
   const [startError, setStartError] = useState<string | null>(null)
   const startedRef = useRef(false)
   const { schedule, cancel } = usePolling(POLL_INTERVAL_MS)
+  const buildHeaders = useHeaders()
 
   const pollJob = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/api/analysis/inconsistencies`, {
-        headers: getAuthHeaders(),
+        headers: await buildHeaders(),
       })
       if (!res.ok) {
         setJob({ status: 'error', topics: [], error: 'Failed to fetch analysis status.' })
@@ -283,7 +288,7 @@ export default function Inconsistencies() {
     } catch {
       setJob({ status: 'error', topics: [], error: 'Network error. Please try again.' })
     }
-  }, [schedule])
+  }, [schedule, buildHeaders])
 
   // On mount: try to resume an existing job, otherwise start a new one
   useEffect(() => {
@@ -299,7 +304,7 @@ export default function Inconsistencies() {
       // Check if a job already exists for this session
       try {
         const res = await fetch(`${API_BASE}/api/analysis/inconsistencies`, {
-          headers: getAuthHeaders(),
+          headers: await buildHeaders(),
         })
         if (res.ok) {
           const data: JobState = await res.json()
@@ -318,7 +323,7 @@ export default function Inconsistencies() {
       try {
         const res = await fetch(`${API_BASE}/api/analysis/inconsistencies`, {
           method: 'POST',
-          headers: getAuthHeaders(),
+          headers: await buildHeaders(),
         })
         if (!res.ok) {
           const data = await res.json().catch(() => ({}))
@@ -335,7 +340,7 @@ export default function Inconsistencies() {
     startAnalysis()
 
     return () => cancel()
-  }, [pollJob, schedule, cancel])
+  }, [pollJob, schedule, cancel, buildHeaders])
 
   const handleCheckBatch = async () => {
     if (!job) return
@@ -359,7 +364,7 @@ export default function Inconsistencies() {
     try {
       await fetch(`${API_BASE}/api/analysis/inconsistencies/topics/check-batch`, {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: await buildHeaders(),
         body: JSON.stringify({ topic_ids: ids }),
       })
     } catch {
@@ -388,7 +393,7 @@ export default function Inconsistencies() {
     try {
       await fetch(`${API_BASE}/api/analysis/inconsistencies/topics/check-all`, {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: await buildHeaders(),
       })
     } catch {
       // Polling will surface any errors
@@ -412,7 +417,7 @@ export default function Inconsistencies() {
     try {
       await fetch(`${API_BASE}/api/analysis/inconsistencies/topics/${topicId}/check`, {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: await buildHeaders(),
       })
     } catch {
       // Polling will surface any errors

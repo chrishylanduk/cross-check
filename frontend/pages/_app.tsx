@@ -1,38 +1,61 @@
 import '@/styles/globals.scss'
 import { useEffect, useState } from 'react'
 import type { AppProps } from 'next/app'
+import { ClerkProvider } from '@clerk/nextjs'
+import { ClerkAuthProvider } from '@/components/ClerkAuthProvider'
 import PrototypePasswordModal from '@/components/PrototypePasswordModal'
 
-export default function App({ Component, pageProps }: AppProps) {
-  const [isAuthenticated, setIsAuthenticated] = useState(false)
-  const [isChecking, setIsChecking] = useState(true)
+const CLERK_PUBLISHABLE_KEY = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+
+function PasswordGatedApp({ Component, pageProps }: AppProps) {
+  const [{ isAuthenticated, isChecking }, setAuthState] = useState({
+    isAuthenticated: false,
+    isChecking: true,
+  })
 
   useEffect(() => {
-    // Initialise GOV.UK Frontend components
-    import('govuk-frontend/dist/govuk/govuk-frontend.min.js').then((GOVUKFrontend) => {
-      GOVUKFrontend.initAll()
-    })
-
-    // Check if already authenticated
-    const authToken = sessionStorage.getItem('prototype-auth-token')
-    if (authToken) {
-      setIsAuthenticated(true)
-    }
-    setIsChecking(false)
+    // Reading from sessionStorage must happen client-side after hydration — this is the
+    // correct Next.js pattern. The setState call here does not cause cascading renders.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setAuthState({ isAuthenticated: !!sessionStorage.getItem('prototype-auth-token'), isChecking: false })
   }, [])
 
-  const handleAuthSuccess = (token: string) => {
-    sessionStorage.setItem('prototype-auth-token', token)
-    setIsAuthenticated(true)
-  }
-
-  if (isChecking) {
-    return null
-  }
+  if (isChecking) return null
 
   if (!isAuthenticated) {
-    return <PrototypePasswordModal onSuccess={handleAuthSuccess} />
+    return (
+      <PrototypePasswordModal
+        onSuccess={(token) => {
+          sessionStorage.setItem('prototype-auth-token', token)
+          setAuthState({ isAuthenticated: true, isChecking: false })
+        }}
+      />
+    )
   }
 
   return <Component {...pageProps} />
+}
+
+export default function App(props: AppProps) {
+  useEffect(() => {
+    import('govuk-frontend/dist/govuk/govuk-frontend.min.js').then((GOVUKFrontend) => {
+      GOVUKFrontend.initAll()
+    })
+  }, [])
+
+  if (CLERK_PUBLISHABLE_KEY) {
+    return (
+      <ClerkProvider
+        publishableKey={CLERK_PUBLISHABLE_KEY}
+        signInUrl="/sign-in"
+        signUpUrl="/sign-up"
+      >
+        <ClerkAuthProvider>
+          <props.Component {...props.pageProps} />
+        </ClerkAuthProvider>
+      </ClerkProvider>
+    )
+  }
+
+  return <PasswordGatedApp {...props} />
 }

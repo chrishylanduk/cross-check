@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { displayFilename } from '@/lib/filename'
+import { useAuthHeaders } from '@/contexts/AuthContext'
 import Head from 'next/head'
 import Link from 'next/link'
 import ReactMarkdown from 'react-markdown'
@@ -47,14 +48,17 @@ interface JobState {
   error: string | null
 }
 
-function getAuthHeaders(): Record<string, string> {
-  const sessionId = sessionStorage.getItem('cross-check-session-id')
-  const authToken = sessionStorage.getItem('prototype-auth-token')
-  return {
-    'Content-Type': 'application/json',
-    ...(sessionId ? { 'X-Session-ID': sessionId } : {}),
-    ...(authToken ? { 'X-Prototype-Auth': authToken } : {}),
-  }
+function useHeaders() {
+  const getAuthHeaders = useAuthHeaders()
+  return useCallback(async () => {
+    const sessionId = sessionStorage.getItem('cross-check-session-id')
+    const auth = await getAuthHeaders()
+    return {
+      'Content-Type': 'application/json',
+      ...(sessionId ? { 'X-Session-ID': sessionId } : {}),
+      ...auth,
+    }
+  }, [getAuthHeaders])
 }
 
 function GuidelinePresetDropdown({
@@ -65,6 +69,7 @@ function GuidelinePresetDropdown({
   onSelect: (content: string) => void
 }) {
   const [loading, setLoading] = useState(false)
+  const buildHeaders = useHeaders()
 
   const handleChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
     const filename = e.target.value
@@ -72,7 +77,7 @@ function GuidelinePresetDropdown({
     setLoading(true)
     try {
       const res = await fetch(`${API_BASE}/api/guidelines/${encodeURIComponent(filename)}`, {
-        headers: getAuthHeaders(),
+        headers: await buildHeaders(),
       })
       if (res.ok) {
         onSelect(await res.text())
@@ -226,6 +231,7 @@ function PageRow({ page, onCheck }: { page: Page; onCheck: (pageId: number) => v
   const [content, setContent] = useState<string | null>(null)
   const [contentLoading, setContentLoading] = useState(false)
   const hasResult = page.check_status === 'complete' && page.result
+  const buildHeaders = useHeaders()
 
   const handleToggleContent = async () => {
     if (showContent) {
@@ -237,7 +243,7 @@ function PageRow({ page, onCheck }: { page: Page; onCheck: (pageId: number) => v
     setContentLoading(true)
     try {
       const res = await fetch(`${API_BASE}/api/collection/${encodeURIComponent(page.filename)}`, {
-        headers: getAuthHeaders(),
+        headers: await buildHeaders(),
       })
       if (res.ok) {
         setContent(await res.text())
@@ -374,13 +380,14 @@ export default function Compliance() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [presets, setPresets] = useState<GuidelinePreset[]>([])
+  const buildHeaders = useHeaders()
   const startedRef = useRef(false)
   const { schedule, cancel } = usePolling(POLL_INTERVAL_MS)
 
   const pollJob = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/api/analysis/compliance`, {
-        headers: getAuthHeaders(),
+        headers: await buildHeaders(),
       })
       if (!res.ok) return
       const data: JobState = await res.json()
@@ -390,7 +397,7 @@ export default function Compliance() {
     } catch {
       // Silently ignore poll failures
     }
-  }, [schedule])
+  }, [schedule, buildHeaders])
 
   useEffect(() => {
     if (startedRef.current) return
@@ -403,7 +410,7 @@ export default function Compliance() {
 
     const init = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/guidelines`, { headers: getAuthHeaders() })
+        const res = await fetch(`${API_BASE}/api/guidelines`, { headers: await buildHeaders() })
         if (res.ok) {
           const data = await res.json()
           setPresets(data.guidelines ?? [])
@@ -414,7 +421,7 @@ export default function Compliance() {
 
       try {
         const res = await fetch(`${API_BASE}/api/compliance/guidelines`, {
-          headers: getAuthHeaders(),
+          headers: await buildHeaders(),
         })
         if (res.ok) {
           const data = await res.json()
@@ -427,7 +434,7 @@ export default function Compliance() {
 
       try {
         const res = await fetch(`${API_BASE}/api/analysis/compliance`, {
-          headers: getAuthHeaders(),
+          headers: await buildHeaders(),
         })
         if (res.ok) {
           const data: JobState = await res.json()
@@ -442,12 +449,12 @@ export default function Compliance() {
 
     init()
     return () => cancel()
-  }, [pollJob, schedule, cancel])
+  }, [pollJob, schedule, cancel, buildHeaders])
 
   const saveGuidelinesAndStartJob = async (text: string): Promise<boolean> => {
     const res = await fetch(`${API_BASE}/api/compliance/guidelines`, {
       method: 'POST',
-      headers: getAuthHeaders(),
+      headers: await buildHeaders(),
       body: JSON.stringify({ guidelines: text }),
     })
     if (!res.ok) {
@@ -458,11 +465,11 @@ export default function Compliance() {
 
     await fetch(`${API_BASE}/api/analysis/compliance`, {
       method: 'POST',
-      headers: getAuthHeaders(),
+      headers: await buildHeaders(),
     })
 
     const jobRes = await fetch(`${API_BASE}/api/analysis/compliance`, {
-      headers: getAuthHeaders(),
+      headers: await buildHeaders(),
     })
     if (jobRes.ok) {
       const data: JobState = await jobRes.json()
@@ -522,7 +529,7 @@ export default function Compliance() {
     try {
       await fetch(`${API_BASE}/api/analysis/compliance/pages/check-batch`, {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: await buildHeaders(),
         body: JSON.stringify({ page_ids: ids }),
       })
     } catch {
@@ -546,7 +553,7 @@ export default function Compliance() {
     try {
       await fetch(`${API_BASE}/api/analysis/compliance/pages/check-all`, {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: await buildHeaders(),
       })
     } catch {
       // Polling will surface any errors
@@ -563,7 +570,7 @@ export default function Compliance() {
     try {
       await fetch(`${API_BASE}/api/analysis/compliance/pages/${pageId}/check`, {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: await buildHeaders(),
       })
     } catch {
       // Polling will surface any errors
@@ -733,10 +740,10 @@ export default function Compliance() {
               try {
                 await fetch(`${API_BASE}/api/analysis/compliance`, {
                   method: 'POST',
-                  headers: getAuthHeaders(),
+                  headers: await buildHeaders(),
                 })
                 const res = await fetch(`${API_BASE}/api/analysis/compliance`, {
-                  headers: getAuthHeaders(),
+                  headers: await buildHeaders(),
                 })
                 if (res.ok) setJob(await res.json())
               } catch {
