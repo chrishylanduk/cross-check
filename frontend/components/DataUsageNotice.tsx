@@ -2,9 +2,11 @@ import { useState } from 'react'
 
 interface DataUsageNoticeProps {
   onAccept: () => void
+  aiProviderName: string
+  aiPrivacyPolicyUrl: string
 }
 
-export default function DataUsageNotice({ onAccept }: DataUsageNoticeProps) {
+export default function DataUsageNotice({ onAccept, aiProviderName, aiPrivacyPolicyUrl }: DataUsageNoticeProps) {
   const [agreed, setAgreed] = useState(false)
 
   const handleAccept = () => {
@@ -26,25 +28,33 @@ export default function DataUsageNotice({ onAccept }: DataUsageNoticeProps) {
 
         <p className="govuk-body">
           Your content is sent to{' '}
-          <a
-            className="govuk-link"
-            href="https://openai.com/en-GB/policies/eu-privacy-policy/"
-            rel="noreferrer noopener"
-            target="_blank"
-          >
-            OpenAI
-          </a>{' '}
-          via its API for analysis. OpenAI does not use API data to train its models. Read
-          OpenAI&rsquo;s{' '}
-          <a
-            className="govuk-link"
-            href="https://openai.com/en-GB/policies/eu-privacy-policy/"
-            rel="noreferrer noopener"
-            target="_blank"
-          >
-            privacy notice
-          </a>{' '}
-          for full details.
+          {aiPrivacyPolicyUrl ? (
+            <a
+              className="govuk-link"
+              href={aiPrivacyPolicyUrl}
+              rel="noreferrer noopener"
+              target="_blank"
+            >
+              {aiProviderName}
+            </a>
+          ) : (
+            aiProviderName
+          )}{' '}
+          via its API for analysis.{' '}
+          {aiPrivacyPolicyUrl && (
+            <>
+              Read {aiProviderName}&rsquo;s{' '}
+              <a
+                className="govuk-link"
+                href={aiPrivacyPolicyUrl}
+                rel="noreferrer noopener"
+                target="_blank"
+              >
+                privacy notice
+              </a>{' '}
+              for full details.
+            </>
+          )}
         </p>
 
         <p className="govuk-body">
@@ -65,7 +75,7 @@ export default function DataUsageNotice({ onAccept }: DataUsageNoticeProps) {
         <ul className="govuk-list govuk-list--bullet">
           <li>you have the right to share this content for analysis</li>
           <li>the content does not include illegal material or malicious code</li>
-          <li>you understand it will be sent to OpenAI for processing</li>
+          <li>you understand it will be sent to {aiProviderName} for processing</li>
         </ul>
 
         <div className="govuk-form-group" style={{ marginTop: '20px' }}>

@@ -58,6 +58,41 @@ Run `make help` to see all available commands:
 - `make dev-backend` - Run FastAPI backend
 - `make clean` - Clean build artifacts
 
+## Self-hosting with your own AI provider
+
+Cross-check is designed to be self-hosted with any LLM provider. Set `ANALYSIS_MODEL` to a [pydantic-ai model string](https://ai.pydantic.dev/models/) and the matching API key:
+
+| Provider | `ANALYSIS_MODEL` example | API key variable |
+|----------|--------------------------|-----------------|
+| OpenAI | `openai:gpt-4.1-mini` | `OPENAI_API_KEY` |
+| Anthropic | `anthropic:claude-3-5-haiku-latest` | `ANTHROPIC_API_KEY` |
+| Google | `google-gla:gemini-2.0-flash` | `GOOGLE_API_KEY` |
+| AWS Bedrock | `bedrock:us.amazon.nova-lite-v1:0` | AWS credential chain |
+| Groq | `groq:llama-3.3-70b-versatile` | `GROQ_API_KEY` |
+
+### Using a local or OpenAI-compatible endpoint
+
+For Ollama, vLLM, LM Studio, or any OpenAI-compatible server, set `OPENAI_BASE_URL` instead of using a provider prefix:
+
+```shell
+OPENAI_BASE_URL=http://localhost:11434/v1
+ANALYSIS_MODEL=llama3.2
+OPENAI_API_KEY=ollama   # required by the client but not validated locally
+```
+
+### Customising the data usage notice
+
+The "Before you upload content" notice tells users which AI provider will process their data. Override the defaults to match your deployment:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AI_PROVIDER_NAME` | Provider name shown to users | `OpenAI` |
+| `AI_PRIVACY_POLICY_URL` | Link to the provider's privacy policy | OpenAI EU privacy policy |
+
+Set `AI_PRIVACY_POLICY_URL` to an empty string (or leave it unset) when using a local model with no external privacy policy — the notice will show the provider name as plain text without a link.
+
+These are read at **runtime** by the frontend server, so changing them only requires a container restart — no rebuild needed.
+
 ## Required environment variables
 
 To run this project, you need a `.env` file with environment variables.

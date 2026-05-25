@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import Head from 'next/head'
 import { useRouter } from 'next/router'
+import type { GetServerSideProps } from 'next'
 import Layout from '@/components/Layout'
 import DataUsageNotice from '@/components/DataUsageNotice'
 import FileList from '@/components/FileList'
@@ -9,6 +10,11 @@ import MarkdownViewModal from '@/components/MarkdownViewModal'
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000'
 const MAX_FILE_SIZE = 50 * 1024 * 1024 // 50MB
 const MAX_FILES = 5000
+
+interface UploadProps {
+  aiProviderName: string
+  aiPrivacyPolicyUrl: string
+}
 
 interface FileInfo {
   name: string
@@ -28,7 +34,16 @@ interface StorageInfo {
   storage_limit: number
 }
 
-export default function Upload() {
+export const getServerSideProps: GetServerSideProps<UploadProps> = async () => {
+  return {
+    props: {
+      aiProviderName: process.env.AI_PROVIDER_NAME || 'OpenAI',
+      aiPrivacyPolicyUrl: process.env.AI_PRIVACY_POLICY_URL || 'https://openai.com/en-GB/policies/eu-privacy-policy/',
+    },
+  }
+}
+
+export default function Upload({ aiProviderName, aiPrivacyPolicyUrl }: UploadProps) {
   const router = useRouter()
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [expiresAt, setExpiresAt] = useState<number | null>(null)
@@ -393,7 +408,11 @@ export default function Upload() {
       <h1 className="govuk-heading-xl">Upload content files</h1>
 
           {!dataUsageAccepted ? (
-            <DataUsageNotice onAccept={() => setDataUsageAccepted(true)} />
+            <DataUsageNotice
+                onAccept={() => setDataUsageAccepted(true)}
+                aiProviderName={aiProviderName}
+                aiPrivacyPolicyUrl={aiPrivacyPolicyUrl}
+              />
           ) : (
             <>
               {!storageInfo?.finalised && (
