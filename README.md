@@ -1,5 +1,7 @@
 # Cross-check
 
+> **This is a personal learning and development project, and is a very early prototype.** Much of this code is AI-generated. It should not be used for production purposes or with sensitive data without independent review.
+
 Automatically recommend improvements to a large collection of written content (e.g. a website or intranet) to improve its consistency, clarity, compliance and completeness. Save hours or days compared to a manual content audit.
 
 ## Tech Stack
@@ -12,51 +14,120 @@ Automatically recommend improvements to a large collection of written content (e
 
 ### Requirements
 
-- Python 3.13+ installed
-- Node.js 18+ and npm installed
-- a `.env` file with the [required environment variables](#required-environment-variables)
+- Python 3.13+
+- Node.js 18+ and npm
+- A `.env` file — copy `.env.example` and fill in your values:
+
+```shell
+cp .env.example .env
+```
 
 ### Installing dependencies
-
-Install both frontend and backend dependencies:
 
 ```shell
 make install
 ```
 
-Or install them separately:
+### Running the development servers
 
-```shell
-# Python backend dependencies
-uv sync
+Open two terminal windows:
 
-# Frontend dependencies
-cd frontend && npm install
-```
-
-## Running the development servers
-
-You need to run both the frontend and backend servers. Open two terminal windows:
-
-**Terminal 1 - Backend (FastAPI)**:
+**Terminal 1 — Backend:**
 ```shell
 make dev-backend
 ```
-The API will be available at http://localhost:8000
+API available at http://localhost:8000
 
-**Terminal 2 - Frontend (Next.js)**:
+**Terminal 2 — Frontend:**
 ```shell
 make dev-frontend
 ```
-The app will be available at http://localhost:3000
+App available at http://localhost:3000
 
-### Available make commands
+Run `make help` to see all available commands.
 
-Run `make help` to see all available commands:
-- `make install` - Install all dependencies
-- `make dev-frontend` - Run Next.js frontend
-- `make dev-backend` - Run FastAPI backend
-- `make clean` - Clean build artifacts
+---
+
+## Authentication
+
+The app requires exactly one authentication method to be configured. It will refuse to start if neither is set, or if both are set simultaneously.
+
+### Option A — Prototype password (simple, default)
+
+A single shared password that gates access to the app. Set in `.env`:
+
+```shell
+PROTOTYPE_PASSWORD=your-secure-password-here   # must be more than 6 characters
+```
+
+To disable password protection entirely (e.g. behind a VPN):
+
+```shell
+DISABLE_PROTOTYPE_PASSWORD=true
+```
+
+### Option B — Clerk email auth (recommended for shared deployments)
+
+Users sign in with their email address and receive a one-time verification code — no password needed. Suitable for demos and shared environments where you want individual accountability and domain-based access control.
+
+#### 1. Create a Clerk account
+
+Sign up at [dashboard.clerk.com](https://dashboard.clerk.com) and create an application.
+
+#### 2. Configure sign-in method
+
+In the Clerk dashboard:
+
+- **User & Authentication → Email, Phone, Username**: enable **Email verification code** only. Disable passwords and all social providers.
+- **User & Authentication → Personal information**: uncheck everything except email (no name, phone, etc.). This makes sign-up as frictionless as sign-in.
+
+#### 3. Add email to the session token
+
+By default, Clerk JWTs do not include the user's email address. Cross-check needs it for domain allowlisting and enforces access at the server before any page is served.
+
+In **Sessions → Customize session token**, add:
+
+```json
+{
+  "email": "{{user.primary_email_address}}"
+}
+```
+
+> **Important:** If `ALLOWED_EMAIL_DOMAINS` is set and this step is skipped, all users will be denied access (fail-closed behaviour).
+
+#### 4. Set session lifetime
+
+In **Sessions → Session lifetime**, set:
+- **Session duration**: 8 hours (covers a working day; users re-verify via email code overnight)
+- **Inactivity timeout**: 2 hours (optional, signs out idle sessions)
+
+The JWT token lifetime can stay at the default (60 seconds) — the SDK refreshes it silently.
+
+#### 5. Set environment variables
+
+Add to `.env` (remove `PROTOTYPE_PASSWORD`):
+
+```shell
+CLERK_SECRET_KEY=sk_live_...
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_live_...
+```
+
+#### 6. Restrict access by email domain (optional)
+
+Set `ALLOWED_EMAIL_DOMAINS` to a comma-separated list of permitted domains:
+
+```shell
+ALLOWED_EMAIL_DOMAINS=example.org,@example.com
+```
+
+- `example.org` — allows `user@example.org` and `user@sub.example.org` (exact + all subdomains)
+- `@example.com` — allows `user@example.com` only (exact match, no subdomains)
+
+Leave unset to allow all verified Clerk users.
+
+Domain enforcement happens server-side in Next.js middleware before any content is served. Users from non-allowed domains are redirected to an access-denied page immediately after sign-in.
+
+---
 
 ## Self-hosting with your own AI provider
 
@@ -72,7 +143,7 @@ Cross-check is designed to be self-hosted with any LLM provider. Set `ANALYSIS_M
 
 ### Using a local or OpenAI-compatible endpoint
 
-For Ollama, vLLM, LM Studio, or any OpenAI-compatible server, set `OPENAI_BASE_URL` instead of using a provider prefix:
+For Ollama, vLLM, LM Studio, or any OpenAI-compatible server:
 
 ```shell
 OPENAI_BASE_URL=http://localhost:11434/v1
@@ -89,32 +160,11 @@ The "Before you upload content" notice tells users which AI provider will proces
 | `AI_PROVIDER_NAME` | Provider name shown to users | `OpenAI` |
 | `AI_PRIVACY_POLICY_URL` | Link to the provider's privacy policy | OpenAI EU privacy policy |
 
-Set `AI_PRIVACY_POLICY_URL` to an empty string (or leave it unset) when using a local model with no external privacy policy — the notice will show the provider name as plain text without a link.
+Set `AI_PRIVACY_POLICY_URL` to an empty string when using a local model — the notice will show the provider name as plain text without a link.
 
-These are read at **runtime** by the frontend server, so changing them only requires a container restart — no rebuild needed.
+These are read at runtime by the frontend server — changing them only requires a restart, no rebuild needed.
 
-## Required environment variables
-
-To run this project, you need a `.env` file with environment variables.
-Copy `.env.example` to `.env` and customise as needed:
-
-```shell
-cp .env.example .env
-```
-
-Key variables:
-
-| Variable | Description | Default | Required |
-|----------|-------------|---------|----------|
-| `PROTOTYPE_PASSWORD` | Password to access the app | - | Yes* |
-| `DISABLE_PROTOTYPE_PASSWORD` | Set to `true` to disable password | - | No |
-| `CORS_ORIGINS` | Comma-separated allowed origins | `http://localhost:3000` | No |
-| `NEXT_PUBLIC_API_BASE` | Backend API URL | `http://localhost:8000` | No |
-| `PORT` | Backend server port | `8000` | No |
-
-*Either `PROTOTYPE_PASSWORD` must be set, or `DISABLE_PROTOTYPE_PASSWORD=true`
-
-The `.env` file is ignored by git for security.
+---
 
 ## Docker Deployment
 
@@ -141,11 +191,11 @@ When deploying to platforms like Railway:
 
 2. **Frontend service**:
    - Set `NEXT_PUBLIC_API_BASE` to your backend service URL
+   - If using Clerk, set `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` here too
 
 3. **Storage**:
    - Files are stored on ephemeral disk (free on Railway, 100GB limit)
    - Sessions expire after 1 hour, files are cleaned up automatically
-   - Orphaned files (from server restarts) are cleaned up on startup
    - No persistent volumes needed for this use case
 
 ### Build individual containers
@@ -158,26 +208,23 @@ docker build -f Dockerfile.backend -t cross-check-backend .
 docker build -f frontend/Dockerfile -t cross-check-frontend ./frontend
 ```
 
+---
 
-### Requirements
+## Contributing
 
-- Python 3.13+ installed
-- a `.env` file with the [required environment variables](#required-environment-variables)
+To install development dependencies:
 
-To install the contributing requirements, open your terminal and enter:
 ```shell
 uv sync --group dev
 ```
 
-## Pre-commit hooks
-
-This project uses pre-commit hooks for code quality checks. After installing the dev dependencies, set up pre-commit:
+### Pre-commit hooks
 
 ```shell
 uv run pre-commit install
 ```
 
-This will automatically run code formatting, linting, and security checks before each commit. To run the checks manually:
+Runs formatting, linting, and security checks before each commit. To run manually:
 
 ```shell
 uv run pre-commit run --all-files

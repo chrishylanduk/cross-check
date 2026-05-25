@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { displayFilename } from '@/lib/filename'
+import { useAuthHeaders } from '@/contexts/AuthContext'
 import Head from 'next/head'
 import Link from 'next/link'
 import ReactMarkdown from 'react-markdown'
@@ -37,14 +38,17 @@ interface IssuesResponse {
   url_map: Record<string, string>
 }
 
-function getAuthHeaders(): Record<string, string> {
-  const sessionId = sessionStorage.getItem('cross-check-session-id')
-  const authToken = sessionStorage.getItem('prototype-auth-token')
-  return {
-    'Content-Type': 'application/json',
-    ...(sessionId ? { 'X-Session-ID': sessionId } : {}),
-    ...(authToken ? { 'X-Prototype-Auth': authToken } : {}),
-  }
+function useHeaders() {
+  const getAuthHeaders = useAuthHeaders()
+  return useCallback(async () => {
+    const sessionId = sessionStorage.getItem('cross-check-session-id')
+    const auth = await getAuthHeaders()
+    return {
+      'Content-Type': 'application/json',
+      ...(sessionId ? { 'X-Session-ID': sessionId } : {}),
+      ...auth,
+    }
+  }, [getAuthHeaders])
 }
 
 function IssueRow({ issue, urlMap, grouped }: { issue: Issue; urlMap: Record<string, string>; grouped?: boolean }) {
@@ -139,6 +143,7 @@ function SummariseSection({ module, issues }: { module: string; issues: Issue[] 
   const [loading, setLoading] = useState(false)
   const [summary, setSummary] = useState<string | null>(null)
   const [summaryError, setSummaryError] = useState<string | null>(null)
+  const buildHeaders = useHeaders()
 
   const handleSummarise = useCallback(async () => {
     setLoading(true)
@@ -146,7 +151,7 @@ function SummariseSection({ module, issues }: { module: string; issues: Issue[] 
     try {
       const res = await fetch(`${API_BASE}/api/issues/${module}/summarise`, {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: await buildHeaders(),
       })
       if (!res.ok) throw new Error()
       const json = await res.json()
@@ -156,7 +161,7 @@ function SummariseSection({ module, issues }: { module: string; issues: Issue[] 
     } finally {
       setLoading(false)
     }
-  }, [module])
+  }, [module, buildHeaders])
 
   return (
     <div style={{ marginBottom: '16px' }}>
@@ -199,19 +204,22 @@ function SummariseSection({ module, issues }: { module: string; issues: Issue[] 
 export default function Issues() {
   const [data, setData] = useState<IssuesResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const buildHeaders = useHeaders()
 
   useEffect(() => {
-    const sessionId = sessionStorage.getItem('cross-check-session-id')
-    if (!sessionId) {
-      setError('No active session. Please upload files to get started.')
-      return
-    }
-
-    fetch(`${API_BASE}/api/issues`, { headers: getAuthHeaders() })
-      .then((r) => (r.ok ? r.json() : Promise.reject(r)))
-      .then(setData)
-      .catch(() => setError('Failed to load issues.'))
-  }, [])
+    ;(async () => {
+      const sessionId = sessionStorage.getItem('cross-check-session-id')
+      if (!sessionId) {
+        setError('No active session. Please upload files to get started.')
+        return
+      }
+      const headers = await buildHeaders()
+      fetch(`${API_BASE}/api/issues`, { headers })
+        .then((r) => (r.ok ? r.json() : Promise.reject(r)))
+        .then(setData)
+        .catch(() => setError('Failed to load issues.'))
+    })()
+  }, [buildHeaders])
 
   const inconsistencies = data?.modules?.inconsistencies
   const compliance = data?.modules?.compliance

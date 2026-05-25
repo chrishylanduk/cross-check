@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import Head from 'next/head'
 import { useRouter } from 'next/router'
 import type { GetServerSideProps } from 'next'
@@ -6,6 +6,7 @@ import Layout from '@/components/Layout'
 import DataUsageNotice from '@/components/DataUsageNotice'
 import FileList from '@/components/FileList'
 import MarkdownViewModal from '@/components/MarkdownViewModal'
+import { useAuthHeaders } from '@/contexts/AuthContext'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000'
 const MAX_FILE_SIZE = 50 * 1024 * 1024 // 50MB
@@ -45,6 +46,7 @@ export const getServerSideProps: GetServerSideProps<UploadProps> = async () => {
 
 export default function Upload({ aiProviderName, aiPrivacyPolicyUrl }: UploadProps) {
   const router = useRouter()
+  const getAuthHeaders = useAuthHeaders()
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [expiresAt, setExpiresAt] = useState<number | null>(null)
   const [uploading, setUploading] = useState(false)
@@ -92,6 +94,29 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl }: UploadPro
     }
   }, [dataUsageAccepted, storageInfo])
 
+  const fetchStorageInfo = useCallback(async (sid: string) => {
+    try {
+      const authHeaders = await getAuthHeaders()
+      const response = await fetch(`${API_BASE}/api/collection`, {
+        headers: {
+          'X-Session-ID': sid,
+          ...authHeaders,
+        },
+      })
+      if (response.status === 401) {
+        sessionStorage.removeItem('cross-check-session-id')
+        setSessionId(null)
+        return
+      }
+      if (response.ok) {
+        const data = await response.json()
+        setStorageInfo(data)
+      }
+    } catch {
+      // Silently fail - storage info is not critical
+    }
+  }, [getAuthHeaders])
+
   // Initialise session — also re-runs when sessionId is cleared (e.g. start again)
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -115,12 +140,12 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl }: UploadPro
 
       // Create new session
       try {
-        const authToken = sessionStorage.getItem('prototype-auth-token')
+        const authHeaders = await getAuthHeaders()
         const response = await fetch(`${API_BASE}/api/session`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            ...(authToken && { 'X-Prototype-Auth': authToken }),
+            ...authHeaders,
           },
         })
 
@@ -142,40 +167,16 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl }: UploadPro
     }
 
     initSession()
-  }, [dataUsageAccepted, sessionId])
-
-  const fetchStorageInfo = async (sid: string) => {
-    try {
-      const authToken = sessionStorage.getItem('prototype-auth-token')
-      const response = await fetch(`${API_BASE}/api/collection`, {
-        headers: {
-          'X-Session-ID': sid,
-          ...(authToken && { 'X-Prototype-Auth': authToken }),
-        },
-      })
-      if (response.status === 401) {
-        // Session expired or server restarted - create new session
-        sessionStorage.removeItem('cross-check-session-id')
-        setSessionId(null)
-        return
-      }
-      if (response.ok) {
-        const data = await response.json()
-        setStorageInfo(data)
-      }
-    } catch {
-      // Silently fail - storage info is not critical
-    }
-  }
+  }, [dataUsageAccepted, sessionId, fetchStorageInfo, getAuthHeaders])
 
   const handleDeleteFile = async (filename: string) => {
     try {
-      const authToken = sessionStorage.getItem('prototype-auth-token')
+      const authHeaders = await getAuthHeaders()
       const response = await fetch(`${API_BASE}/api/collection/${encodeURIComponent(filename)}`, {
         method: 'DELETE',
         headers: {
           'X-Session-ID': sessionId as string,
-          ...(authToken && { 'X-Prototype-Auth': authToken }),
+          ...authHeaders,
         },
       })
 
@@ -196,7 +197,7 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl }: UploadPro
     const isFinalised = storageInfo?.finalised
 
     try {
-      const authToken = sessionStorage.getItem('prototype-auth-token')
+      const authHeaders = await getAuthHeaders()
 
       if (isFinalised) {
         // Drop the old session so the init effect creates a fresh one
@@ -217,7 +218,7 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl }: UploadPro
           method: 'DELETE',
           headers: {
             'X-Session-ID': sessionId as string,
-            ...(authToken && { 'X-Prototype-Auth': authToken }),
+            ...authHeaders,
           },
         })
 
@@ -244,12 +245,12 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl }: UploadPro
 
   const handleFinalise = async () => {
     try {
-      const authToken = sessionStorage.getItem('prototype-auth-token')
+      const authHeaders = await getAuthHeaders()
       const response = await fetch(`${API_BASE}/api/collection/finalise`, {
         method: 'POST',
         headers: {
           'X-Session-ID': sessionId as string,
-          ...(authToken && { 'X-Prototype-Auth': authToken }),
+          ...authHeaders,
         },
       })
 
@@ -272,11 +273,11 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl }: UploadPro
     setModalLoading(true)
 
     try {
-      const authToken = sessionStorage.getItem('prototype-auth-token')
+      const authHeaders = await getAuthHeaders()
       const response = await fetch(`${API_BASE}/api/collection/${encodeURIComponent(filename)}`, {
         headers: {
           'X-Session-ID': sessionId as string,
-          ...(authToken && { 'X-Prototype-Auth': authToken }),
+          ...authHeaders,
         },
       })
 
@@ -331,12 +332,12 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl }: UploadPro
       formData.append('strip_before_h1', stripBeforeH1 ? 'true' : 'false')
       formData.append('footer_cutoff', footerCutoff.trim())
 
-      const authToken = sessionStorage.getItem('prototype-auth-token')
+      const authHeaders = await getAuthHeaders()
       const response = await fetch(`${API_BASE}/api/upload`, {
         method: 'POST',
         headers: {
           'X-Session-ID': sessionId as string,
-          ...(authToken && { 'X-Prototype-Auth': authToken }),
+          ...authHeaders,
         },
         body: formData,
       })

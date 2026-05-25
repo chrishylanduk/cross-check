@@ -1,6 +1,7 @@
 """FastAPI backend for Cross-check."""
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -18,6 +19,8 @@ from typing import Dict, List, Optional
 
 import aiofiles
 import filetype
+import jwt
+from jwt import PyJWKClient
 from dotenv import load_dotenv
 from phoenix.otel import register as phoenix_register
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
@@ -56,13 +59,40 @@ PROTOTYPE_PASSWORD_ENABLED = (
 )
 PROTOTYPE_PASSWORD = os.getenv("PROTOTYPE_PASSWORD", "")
 
-# Validate prototype password configuration at startup
-if PROTOTYPE_PASSWORD_ENABLED and not PROTOTYPE_PASSWORD:
+# Clerk auth configuration
+CLERK_SECRET_KEY = os.getenv("CLERK_SECRET_KEY", "")
+CLERK_PUBLISHABLE_KEY = os.getenv("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY", "")
+CLERK_ENABLED = bool(CLERK_SECRET_KEY)
+
+_CLERK_PK_RE = re.compile(r"^pk_(live|test)_[A-Za-z0-9+/=]+$")
+
+# Validate auth configuration at startup
+if CLERK_ENABLED and PROTOTYPE_PASSWORD:
     logger.error(
-        "PROTOTYPE_PASSWORD environment variable must be set, "
-        "or set DISABLE_PROTOTYPE_PASSWORD=true to disable password protection"
+        "PROTOTYPE_PASSWORD and Clerk auth cannot both be configured. "
+        "Remove PROTOTYPE_PASSWORD when using Clerk."
     )
     sys.exit(1)
+if CLERK_ENABLED:
+    if not CLERK_PUBLISHABLE_KEY:
+        logger.error(
+            "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY must be set when CLERK_SECRET_KEY is provided"
+        )
+        sys.exit(1)
+    if not _CLERK_PK_RE.match(CLERK_PUBLISHABLE_KEY):
+        logger.error("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY format is invalid")
+        sys.exit(1)
+elif PROTOTYPE_PASSWORD_ENABLED:
+    if not PROTOTYPE_PASSWORD:
+        logger.error(
+            "PROTOTYPE_PASSWORD must be set, "
+            "or set DISABLE_PROTOTYPE_PASSWORD=true to disable password protection, "
+            "or configure Clerk auth with CLERK_SECRET_KEY + NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY"
+        )
+        sys.exit(1)
+    if len(PROTOTYPE_PASSWORD) <= 6:
+        logger.error("PROTOTYPE_PASSWORD must be more than 6 characters")
+        sys.exit(1)
 
 # Hash used only for password verification — never exposed externally
 PROTOTYPE_PASSWORD_HASH = (
@@ -72,6 +102,82 @@ PROTOTYPE_PASSWORD_HASH = (
 )
 # Random tokens issued on successful auth — separate from the password hash
 VALID_AUTH_TOKENS: set[str] = set()
+
+# ---------------------------------------------------------------------------
+# Clerk JWT verification
+# ---------------------------------------------------------------------------
+
+_jwks_client: PyJWKClient | None = None
+
+
+def _clerk_jwks_url() -> str:
+    """Derive the JWKS URL from the Clerk publishable key."""
+    raw = CLERK_PUBLISHABLE_KEY.split("_", 2)[2]
+    # Pad to a multiple of 4 for standard base64 decoding
+    padded = raw + "=" * (4 - len(raw) % 4)
+    domain = base64.b64decode(padded).decode("utf-8").rstrip("$")
+    return f"https://{domain}/.well-known/jwks.json"
+
+
+def _get_jwks_client() -> PyJWKClient:
+    global _jwks_client
+    if _jwks_client is None:
+        _jwks_client = PyJWKClient(
+            _clerk_jwks_url(),
+            cache_jwk_set=True,
+            lifespan=3600,
+        )
+    return _jwks_client
+
+
+def _decode_clerk_token(token: str) -> dict | None:
+    """Verify a Clerk session JWT and return its claims, or None on failure."""
+    try:
+        client = _get_jwks_client()
+        signing_key = client.get_signing_key_from_jwt(token)
+        issuer = f"https://{_clerk_jwks_url().split('/')[2]}"
+        return jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+            issuer=issuer,
+            options={"verify_aud": False},
+        )
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Email domain allowlist
+# ---------------------------------------------------------------------------
+
+ALLOWED_EMAIL_DOMAINS: list[str] = [
+    d.strip().lower()
+    for d in os.getenv("ALLOWED_EMAIL_DOMAINS", "").split(",")
+    if d.strip()
+]
+
+
+def _is_email_domain_allowed(email: str) -> bool:
+    """Return True if the email's domain matches an entry in ALLOWED_EMAIL_DOMAINS.
+
+    Prefix an entry with '@' for an exact-domain match only (e.g. '@example.com'
+    allows user@example.com but not user@sub.example.com).
+    Without '@', the entry also allows all subdomains (e.g. 'example.org'
+    allows user@example.org and user@sub.example.org).
+    If ALLOWED_EMAIL_DOMAINS is empty, all domains are allowed.
+    """
+    if not ALLOWED_EMAIL_DOMAINS:
+        return True
+    domain = email.rsplit("@", 1)[-1].lower()
+    for allowed in ALLOWED_EMAIL_DOMAINS:
+        if allowed.startswith("@"):
+            if domain == allowed[1:]:
+                return True
+        elif domain == allowed or domain.endswith("." + allowed):
+            return True
+    return False
+
 
 # Initialise rate limiter
 limiter = Limiter(key_func=get_remote_address)
@@ -117,9 +223,20 @@ async def lifespan(app: FastAPI):
     _init_db()
     logger.info("=" * 60)
     logger.info("Cross-check API starting")
-    logger.info(
-        f"Prototype password: {'ENABLED' if PROTOTYPE_PASSWORD_ENABLED else 'DISABLED'}"
-    )
+    if CLERK_ENABLED:
+        logger.info("Auth mode: Clerk (JWT)")
+        if ALLOWED_EMAIL_DOMAINS:
+            logger.info(
+                f"Email domain allowlist: {len(ALLOWED_EMAIL_DOMAINS)} domain(s)"
+            )
+        else:
+            logger.warning(
+                "ALLOWED_EMAIL_DOMAINS is not set — all verified emails are permitted"
+            )
+    else:
+        logger.info(
+            f"Auth mode: prototype password {'ENABLED' if PROTOTYPE_PASSWORD_ENABLED else 'DISABLED'}"
+        )
     logger.info(f"CORS allowed origins: {', '.join(CORS_ORIGINS)}")
     logger.info(f"Session timeout: {SESSION_TIMEOUT}s ({SESSION_TIMEOUT // 3600}h)")
     logger.info(f"Data directory: {DATA_DIR}")
@@ -168,27 +285,52 @@ class PasswordValidationRequest(BaseModel):
     password: str
 
 
-# Prototype password middleware
+# Auth middleware — handles both Clerk JWT mode and prototype password mode
 @app.middleware("http")
-async def prototype_password_middleware(request: Request, call_next):
-    """Check prototype password on all requests (except auth endpoints)."""
-    # Skip password check if disabled
+async def auth_middleware(request: Request, call_next):
+    """Enforce authentication on all requests except health and root."""
+    # Always allow health check and root
+    if request.url.path in ["/health", "/"]:
+        return await call_next(request)
+
+    if CLERK_ENABLED:
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Authentication required"},
+            )
+        claims = _decode_clerk_token(auth_header[7:])
+        if claims is None:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Authentication required"},
+            )
+        if ALLOWED_EMAIL_DOMAINS:
+            # Fail closed: if email is absent from claims (not added to Clerk session token), deny access.
+            email = claims.get("email", "")
+            if not email or not _is_email_domain_allowed(email):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Access denied"},
+                )
+        return await call_next(request)
+
+    # Prototype password mode
     if not PROTOTYPE_PASSWORD_ENABLED:
         return await call_next(request)
 
-    # Allow auth endpoints and health check
-    if request.url.path in ["/api/auth/validate", "/health", "/"]:
+    # Allow the password validation endpoint itself
+    if request.url.path == "/api/auth/validate":
         return await call_next(request)
 
-    # Check for valid auth token in header
     auth_token = request.headers.get("X-Prototype-Auth")
     if auth_token and auth_token in VALID_AUTH_TOKENS:
         return await call_next(request)
 
-    # Unauthorized
     return JSONResponse(
         status_code=401,
-        content={"detail": "Prototype password required"},
+        content={"detail": "Authentication required"},
     )
 
 
@@ -339,6 +481,9 @@ def _db_set_finalised(session_id: str) -> None:
 
 def _db_delete_session(session_id: str) -> None:
     with _db_conn() as conn:
+        conn.execute(
+            "DELETE FROM compliance_guidelines WHERE session_id = ?", (session_id,)
+        )
         conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
 
 
@@ -373,14 +518,6 @@ def _db_set_compliance_guidelines(session_id: str, guidelines: str) -> None:
             "INSERT INTO compliance_guidelines (session_id, guidelines) VALUES (?, ?)"
             " ON CONFLICT(session_id) DO UPDATE SET guidelines = excluded.guidelines",
             (session_id, guidelines),
-        )
-
-
-def _db_delete_compliance_guidelines(session_id: str) -> None:
-    with _db_conn() as conn:
-        conn.execute(
-            "DELETE FROM compliance_guidelines WHERE session_id = ?",
-            (session_id,),
         )
 
 
@@ -598,6 +735,8 @@ async def health():
 async def validate_password(
     request: Request, password_request: PasswordValidationRequest
 ):
+    if CLERK_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
     """Validate prototype password and return auth token."""
     if not PROTOTYPE_PASSWORD_ENABLED:
         return {"valid": True, "token": None, "message": "Password protection disabled"}  # nosec B105
