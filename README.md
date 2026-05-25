@@ -166,6 +166,44 @@ These are read at runtime by the frontend server — changing them only requires
 
 ---
 
+## Demo files
+
+You can pre-load a set of demo HTML files from a private Backblaze B2 bucket. When configured, an **Or load demo files** button appears on the upload page. Demo files go through the same conversion pipeline as regular uploads — users can then add, view, or delete files before proceeding.
+
+### Setup
+
+1. Create a private B2 bucket containing two files:
+   - `demo.zip` — a zip of your raw HTML files. Subdirectories are supported; paths are flattened to dashes. macOS metadata (`__MACOSX/`) and hidden files are ignored automatically.
+   - `demo.toml` — optional, see [Configuring HTML processing](#configuring-html-processing) below.
+
+2. Create an application key scoped to that bucket with **read-only** access.
+
+3. Add to `.env`:
+
+```shell
+B2_KEY_ID=your-b2-key-id
+B2_APPLICATION_KEY=your-b2-application-key
+B2_BUCKET_NAME=your-bucket-name
+```
+
+### Configuring HTML processing
+
+Optionally place a file named `demo.toml` in the bucket root to set HTML processing options. Both keys are optional — omit the file entirely to apply no processing.
+
+```toml
+# Remove everything before the first heading in each HTML file.
+# Useful for stripping navigation and page banners.
+strip_before_h1 = true
+
+# Remove everything from the last occurrence of this text onwards (inclusive).
+# Useful for stripping repeated footer content.
+footer_cutoff = "Was this page helpful?"
+```
+
+These options correspond directly to the **HTML processing options** controls on the upload page.
+
+---
+
 ## Docker Deployment
 
 This project uses hardened Chainguard base images for security.

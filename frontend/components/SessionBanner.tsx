@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/router'
 import { usePolling } from '@/hooks/usePolling'
+import { useAuthHeaders } from '@/contexts/AuthContext'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000'
 const POLL_INTERVAL_MS = 5000
@@ -23,19 +24,22 @@ export default function SessionBanner() {
   const [finalised, setFinalised] = useState(false)
   const { schedule, cancel } = usePolling(POLL_INTERVAL_MS)
   const startedRef = useRef(false)
+  const getAuthHeaders = useAuthHeaders()
 
-  const pollIssues = useCallback(async (headers: Record<string, string>) => {
+  const pollIssues = useCallback(async (sessionId: string) => {
     try {
+      const authHeaders = await getAuthHeaders()
+      const headers = { 'X-Session-ID': sessionId, ...authHeaders }
       const issues = await fetch(`${API_BASE}/api/issues`, { headers }).then((r) => (r.ok ? r.json() : null))
       if (issues) {
         setSession((prev) => prev ? { ...prev, issueCount: sumIssues(issues.modules) } : prev)
       }
       // eslint-disable-next-line react-hooks/immutability
-      schedule(() => pollIssues(headers))
+      schedule(() => pollIssues(sessionId))
     } catch {
       // Silently ignore poll failures
     }
-  }, [schedule])
+  }, [schedule, getAuthHeaders])
 
   useEffect(() => {
     if (startedRef.current) return
@@ -45,17 +49,15 @@ export default function SessionBanner() {
     const expiresAt = sessionStorage.getItem('cross-check-expires-at')
     if (!sessionId || !expiresAt) return
 
-    const headers = {
-      'X-Session-ID': sessionId,
-      ...(sessionStorage.getItem('prototype-auth-token')
-        ? { 'X-Prototype-Auth': sessionStorage.getItem('prototype-auth-token') as string }
-        : {}),
-    }
+    ;(async () => {
+      const authHeaders = await getAuthHeaders()
+      const headers = { 'X-Session-ID': sessionId, ...authHeaders }
 
-    Promise.all([
-      fetch(`${API_BASE}/api/collection`, { headers }).then((r) => (r.ok ? r.json() : null)),
-      fetch(`${API_BASE}/api/issues`, { headers }).then((r) => (r.ok ? r.json() : null)),
-    ]).then(([collection, issues]) => {
+      const [collection, issues] = await Promise.all([
+        fetch(`${API_BASE}/api/collection`, { headers }).then((r) => (r.ok ? r.json() : null)),
+        fetch(`${API_BASE}/api/issues`, { headers }).then((r) => (r.ok ? r.json() : null)),
+      ]).catch(() => [null, null])
+
       if (!collection) return
       const isFinalised = collection.finalised
       const issueCount = issues ? sumIssues(issues.modules) : 0
@@ -67,12 +69,12 @@ export default function SessionBanner() {
         finalised: isFinalised,
       })
       if (isFinalised) {
-        schedule(() => pollIssues(headers))
+        schedule(() => pollIssues(sessionId))
       }
-    }).catch(() => {})
+    })()
 
     return () => cancel()
-  }, [schedule, cancel, pollIssues])
+  }, [schedule, cancel, pollIssues, getAuthHeaders])
 
   if (!session) return null
 

@@ -15,6 +15,7 @@ const MAX_FILES = 5000
 interface UploadProps {
   aiProviderName: string
   aiPrivacyPolicyUrl: string
+  demoAvailable: boolean
 }
 
 interface FileInfo {
@@ -40,11 +41,12 @@ export const getServerSideProps: GetServerSideProps<UploadProps> = async () => {
     props: {
       aiProviderName: process.env.AI_PROVIDER_NAME || 'OpenAI',
       aiPrivacyPolicyUrl: process.env.AI_PRIVACY_POLICY_URL || 'https://openai.com/en-GB/policies/eu-privacy-policy/',
+      demoAvailable: !!(process.env.B2_KEY_ID && process.env.B2_APPLICATION_KEY && process.env.B2_BUCKET_NAME),
     },
   }
 }
 
-export default function Upload({ aiProviderName, aiPrivacyPolicyUrl }: UploadProps) {
+export default function Upload({ aiProviderName, aiPrivacyPolicyUrl, demoAvailable }: UploadProps) {
   const router = useRouter()
   const getAuthHeaders = useAuthHeaders()
   const [sessionId, setSessionId] = useState<string | null>(null)
@@ -61,6 +63,7 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl }: UploadPro
   const [modalError, setModalError] = useState<string | null>(null)
   const [stripBeforeH1, setStripBeforeH1] = useState(false)
   const [footerCutoff, setFooterCutoff] = useState('')
+  const [loadingDemo, setLoadingDemo] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
   const initialisingRef = useRef<boolean>(false)
@@ -298,6 +301,49 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl }: UploadPro
     setModalFilename(null)
     setModalContent(null)
     setModalError(null)
+  }
+
+  const handleLoadDemo = async () => {
+    setLoadingDemo(true)
+    setError(null)
+    setSuccess(null)
+    setRejectedFiles([])
+    try {
+      const authHeaders = await getAuthHeaders()
+      const response = await fetch(`${API_BASE}/api/demo/load`, {
+        method: 'POST',
+        headers: {
+          'X-Session-ID': sessionId as string,
+          ...authHeaders,
+        },
+      })
+      if (response.status === 401) {
+        sessionStorage.removeItem('cross-check-session-id')
+        setSessionId(null)
+        throw new Error('Session expired. Please try again.')
+      }
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data.detail || `Failed to load demo files (${response.status})`)
+      }
+      const result = await response.json()
+      if (result.rejected_files?.length > 0) {
+        setRejectedFiles(result.rejected_files)
+      }
+      if (result.file_count > 0) {
+        sessionStorage.setItem('cross-check-has-files', 'true')
+        setSuccess(
+          `${result.file_count} demo file${result.file_count !== 1 ? 's' : ''} loaded successfully`,
+        )
+      } else if (result.rejected_files?.length > 0) {
+        setError('No demo files could be loaded. Check the list below for details.')
+      }
+      await fetchStorageInfo(sessionId as string)
+    } catch (err) {
+      setError((err as Error).message || 'Failed to load demo files')
+    } finally {
+      setLoadingDemo(false)
+    }
   }
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -592,6 +638,17 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl }: UploadPro
                     >
                       {uploading ? 'Uploading...' : 'Or add entire folder'}
                     </button>
+                    {demoAvailable && (
+                      <button
+                        type="button"
+                        className="govuk-button govuk-button--secondary"
+                        data-module="govuk-button"
+                        onClick={handleLoadDemo}
+                        disabled={loadingDemo || uploading || !sessionId}
+                      >
+                        {loadingDemo ? 'Loading demo files…' : 'Or load demo files'}
+                      </button>
+                    )}
                   </div>
 
                   {storageInfo && storageInfo.file_count > 0 && (

@@ -676,6 +676,7 @@ dependencies = [
     { name = "bertopic" },
     { name = "fastapi" },
     { name = "filetype" },
+    { name = "httpx" },
     { name = "markitdown" },
     { name = "openinference-instrumentation-openai" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
@@ -692,7 +693,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "ipykernel" },
     { name = "itables" },
     { name = "jupyter" },
@@ -712,6 +712,7 @@ requires-dist = [
     { name = "bertopic", specifier = ">=0.16.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "filetype", specifier = ">=1.2.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "markitdown", specifier = ">=0.0.1a2" },
     { name = "openinference-instrumentation-openai", specifier = ">=0.1.45" },
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.20.0" },
@@ -728,7 +729,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = ">=0.28.1" },
     { name = "ipykernel" },
     { name = "itables" },
     { name = "jupyter" },
