@@ -1,5 +1,5 @@
 # Multi-stage build for Python backend
-FROM cgr.dev/chainguard/python:latest-dev AS builder
+FROM python:3.13-slim AS builder
 
 WORKDIR /app
 
@@ -13,10 +13,13 @@ COPY src/ ./src/
 # Install dependencies and package
 RUN uv sync --frozen --no-dev
 
-# Production stage with minimal runtime image
-FROM cgr.dev/chainguard/python:latest
+# Production stage
+FROM python:3.13-slim
 
 WORKDIR /app
+
+# Create non-root user
+RUN useradd --system --no-create-home appuser
 
 # Copy virtual environment from builder
 COPY --from=builder /app/.venv /app/.venv
@@ -25,9 +28,9 @@ COPY --from=builder /app/.venv /app/.venv
 COPY src/ ./src/
 COPY guidelines/ ./guidelines/
 
-# Create data directory for ephemeral storage
+# Create data directory for ephemeral storage and set ownership
 # Note: Uses container's ephemeral filesystem (free on Railway, limited to 100GB)
-RUN mkdir -p /app/data/collections
+RUN mkdir -p /app/data/collections && chown -R appuser /app/data
 
 # Set environment variables
 ENV PATH="/app/.venv/bin:$PATH" \
@@ -35,14 +38,14 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PORT=8000
 
+USER appuser
+
 # Expose port (Railway and other platforms may override with PORT env var)
 EXPOSE 8000
 
 # Health check (uses PORT env var if set)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD ["/bin/sh", "-c", "/app/.venv/bin/python -c 'import urllib.request,os; urllib.request.urlopen(f\"http://localhost:{os.getenv(\"PORT\",\"8000\")}/health\").read()'"]
-
-USER nonroot
 
 # Run the application (reads PORT from environment)
 CMD ["/bin/sh", "-c", "uvicorn cross_check.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
