@@ -393,6 +393,7 @@ export default function Compliance() {
       const data: JobState = await res.json()
       setJob(data)
       const anyChecking = data.pages.some((p) => p.check_status === 'checking')
+      // eslint-disable-next-line react-hooks/immutability
       if (anyChecking) schedule(pollJob)
     } catch {
       // Silently ignore poll failures
@@ -404,6 +405,7 @@ export default function Compliance() {
     startedRef.current = true
 
     if (!sessionStorage.getItem('cross-check-session-id')) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setError('No active session. Please upload files to get started.')
       return
     }

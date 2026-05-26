@@ -86,7 +86,8 @@ repos:
       - id: pip-audit
         name: pip-audit - Python dependency vulnerabilities
         language: system
-        entry: bash -c 'uv run pip-audit --path .venv'
+        # strawberry-graphql is pinned by arize-phoenix; ignored until upstream releases a fix.
+        entry: bash -c 'uv run pip-audit --path .venv --ignore-vuln CVE-2026-45739'
         pass_filenames: false
         files: '^(pyproject\.toml|uv\.lock)$'
 

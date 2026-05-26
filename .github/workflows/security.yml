@@ -65,7 +65,8 @@ jobs:
         run: |
           pip install pip-audit
           uv export --no-dev --no-emit-project --format requirements-txt > /tmp/requirements.txt
-          pip-audit -r /tmp/requirements.txt
+          # strawberry-graphql is pinned by arize-phoenix; ignored until upstream releases a fix.
+          pip-audit -r /tmp/requirements.txt --ignore-vuln CVE-2026-45739
 
   # ── Frontend dependency audit ──────────────────────────────────────────────
   npm-audit:

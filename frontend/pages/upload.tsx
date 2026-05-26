@@ -70,10 +70,10 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl, demoAvailab
 
   // Check data usage acceptance
   useEffect(() => {
-    const accepted = sessionStorage.getItem('data-usage-accepted')
-    if (accepted === 'true') {
-      setDataUsageAccepted(true)
-    }
+    // Reading from sessionStorage must happen client-side after hydration — this is the
+    // correct Next.js pattern. The setState call here does not cause cascading renders.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setDataUsageAccepted(sessionStorage.getItem('data-usage-accepted') === 'true')
   }, [])
 
   // Re-initialise GOV.UK Frontend when form becomes visible
