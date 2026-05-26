@@ -1,5 +1,5 @@
 # Multi-stage build for Next.js frontend
-FROM cgr.dev/chainguard/node:latest-dev AS builder
+FROM node:22-slim AS builder
 
 WORKDIR /app
 
@@ -12,11 +12,17 @@ RUN npm ci
 # Copy application code
 COPY . .
 
+# NEXT_PUBLIC_* vars are inlined at build time — declare as ARGs so Railway can pass them in
+ARG NEXT_PUBLIC_API_BASE
+ARG NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+ENV NEXT_PUBLIC_API_BASE=$NEXT_PUBLIC_API_BASE
+ENV NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=$NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+
 # Build application in standalone mode
 RUN npm run build
 
-# Production stage with minimal runtime image
-FROM cgr.dev/chainguard/node:latest
+# Production stage
+FROM node:22-slim
 
 WORKDIR /app
 
@@ -34,9 +40,10 @@ EXPOSE 3000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["/usr/bin/node", "-e", "require('http').get('http://localhost:3000', (r) => process.exit(r.statusCode === 200 ? 0 : 1))"]
+    CMD ["node", "-e", "require('http').get('http://localhost:3000', (r) => process.exit(r.statusCode === 200 ? 0 : 1))"]
 
-USER nonroot
+# node:22-slim includes a built-in non-root 'node' user
+USER node
 
 # Run the application
 CMD ["node", "server.js"]
