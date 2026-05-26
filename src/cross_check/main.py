@@ -190,18 +190,20 @@ limiter = Limiter(key_func=get_remote_address)
 PHOENIX_ENDPOINT = os.getenv("PHOENIX_ENDPOINT", "")
 
 
+_OPENINFERENCE_INSTRUMENTORS = [
+    ("openinference.instrumentation.openai", "OpenAIInstrumentor"),
+    ("openinference.instrumentation.anthropic", "AnthropicInstrumentor"),
+    ("openinference.instrumentation.google_genai", "GoogleGenAIInstrumentor"),
+    ("openinference.instrumentation.mistralai", "MistralAIInstrumentor"),
+]
+
+
 def _instrument_providers(tracer_provider: object) -> None:
     """Instrument whichever OpenInference provider packages are installed."""
-    instrumentors = [
-        ("openinference.instrumentation.openai", "OpenAIInstrumentor"),
-        ("openinference.instrumentation.anthropic", "AnthropicInstrumentor"),
-        ("openinference.instrumentation.google_genai", "GoogleGenAIInstrumentor"),
-        ("openinference.instrumentation.mistralai", "MistralAIInstrumentor"),
-    ]
-    for module_name, class_name in instrumentors:
-        try:
-            import importlib
+    import importlib
 
+    for module_name, class_name in _OPENINFERENCE_INSTRUMENTORS:
+        try:
             module = importlib.import_module(module_name)
             getattr(module, class_name)().instrument(tracer_provider=tracer_provider)
             logger.debug(f"Instrumented {class_name}")
