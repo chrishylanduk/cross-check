@@ -890,11 +890,14 @@ docs/_linkcheck/
 *.xls
 *.xlsx
 
+# Ignore any .env file everywhere, but allow .env.example files
+**/.env
+!**/.env.example
+
 # Next.js (un-ignore frontend/lib/ which is caught by the Python lib/ pattern above)
 !frontend/lib/
 frontend/.next/
 frontend/out/
-frontend/.env*.local
 frontend/tsconfig.tsbuildinfo
 frontend/next-env.d.ts
 

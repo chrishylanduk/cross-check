@@ -1,11 +1,4 @@
 import type { NextConfig } from 'next'
-import * as dotenv from 'dotenv'
-import * as path from 'path'
-
-// Load the root-level .env so NEXT_PUBLIC_ vars work without a separate
-// frontend/.env file. Vars already in the environment (Docker, CI) take
-// precedence because dotenv never overwrites existing values.
-dotenv.config({ path: path.join(__dirname, '../.env') })
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000'
 

@@ -37,11 +37,22 @@ interface StorageInfo {
 }
 
 export const getServerSideProps: GetServerSideProps<UploadProps> = async () => {
+  let demoAvailable = false
+  try {
+    const res = await fetch(`${API_BASE}/api/config`)
+    if (res.ok) {
+      const data = await res.json()
+      demoAvailable = !!data.demo_available
+    }
+  } catch {
+    // backend unreachable at build/render time — demo button hidden
+  }
+
   return {
     props: {
       aiProviderName: process.env.AI_PROVIDER_NAME || 'OpenAI',
       aiPrivacyPolicyUrl: process.env.AI_PRIVACY_POLICY_URL || 'https://openai.com/en-GB/policies/eu-privacy-policy/',
-      demoAvailable: !!(process.env.B2_KEY_ID && process.env.B2_APPLICATION_KEY && process.env.B2_BUCKET_NAME),
+      demoAvailable,
     },
   }
 }

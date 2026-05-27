@@ -752,6 +752,12 @@ async def health():
     return {"status": "healthy"}
 
 
+@app.get("/api/config")
+async def config():
+    """Public feature flags for the frontend."""
+    return {"demo_available": B2_DEMO_ENABLED}
+
+
 @app.post("/api/auth/validate")
 @limiter.limit("10/minute")
 async def validate_password(
