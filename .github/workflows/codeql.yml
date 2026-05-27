@@ -12,7 +12,6 @@ on:
 permissions:
   contents: read
   security-events: write
-  actions: read  # required for telemetry on private repos
 
 jobs:
   analyse:
@@ -42,6 +41,3 @@ jobs:
         uses: github/codeql-action/analyze@v4
         with:
           category: "/language:${{ matrix.language }}"
-          # SARIF upload requires GitHub Advanced Security (free on public repos).
-          # Set to always once the repo is public.
-          upload: ${{ github.event.repository.visibility == 'public' }}
