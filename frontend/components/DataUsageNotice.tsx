@@ -64,7 +64,7 @@ export default function DataUsageNotice({ onAccept, aiProviderName, aiPrivacyPol
 
         <p className="govuk-body">
           If you need to keep your content on your own infrastructure, the{' '}
-          <a className="govuk-link" href="#">
+          <a className="govuk-link" href="https://github.com/chrishylanduk/cross-check/actions" rel="noreferrer noopener" target="_blank">
             source code is open source
           </a>{' '}
           and can be self-hosted with your own AI provider.
