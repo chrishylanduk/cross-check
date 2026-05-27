@@ -33,14 +33,11 @@ COPY --from=builder /app/public ./public
 
 # Set environment variables
 ENV NODE_ENV=production \
-    PORT=3000
+    HOSTNAME=0.0.0.0
 
-# Expose port
-EXPOSE 3000
-
-# Health check
+# Health check (uses PORT env var set by Railway)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["node", "-e", "require('http').get('http://localhost:3000', (r) => process.exit(r.statusCode === 200 ? 0 : 1))"]
+    CMD ["node", "-e", "require('http').get('http://localhost:' + (process.env.PORT || 3000), (r) => process.exit(r.statusCode === 200 ? 0 : 1))"]
 
 # node:22-slim includes a built-in non-root 'node' user
 USER node
