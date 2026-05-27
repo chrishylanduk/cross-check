@@ -47,6 +47,7 @@ interface Topic {
 
 interface JobState {
   status: 'discovering' | 'topics_ready' | 'error'
+  phase?: 'chunking' | 'embedding' | 'modelling' | null
   topics: Topic[]
   error: string | null
   url_map?: Record<string, string>
@@ -454,7 +455,12 @@ export default function Inconsistencies() {
       )}
 
       {job?.status === 'discovering' && (
-        <p className="govuk-body">Discovering topics in your documents&hellip;</p>
+        <p className="govuk-body">
+          {job.phase === 'chunking' && 'Reading your documents…'}
+          {job.phase === 'embedding' && 'Analysing content…'}
+          {job.phase === 'modelling' && 'Grouping content into topics…'}
+          {!job.phase && 'Starting analysis…'}
+        </p>
       )}
 
       {job?.status === 'error' && (

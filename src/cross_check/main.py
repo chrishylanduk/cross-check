@@ -1855,6 +1855,19 @@ def _get_llm_semaphore() -> asyncio.Semaphore:
     return _llm_semaphore
 
 
+# Cap simultaneous embedding + BERTopic runs — each is memory-intensive.
+# Default 1 is safe for small single-server deployments; raise via ANALYSIS_CONCURRENCY.
+ANALYSIS_CONCURRENCY = int(os.getenv("ANALYSIS_CONCURRENCY", "1"))
+_analysis_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_analysis_semaphore() -> asyncio.Semaphore:
+    global _analysis_semaphore
+    if _analysis_semaphore is None:
+        _analysis_semaphore = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
+    return _analysis_semaphore
+
+
 def _job_key(session_id: str, analysis_type: str) -> str:
     return f"{session_id}:{analysis_type}"
 
@@ -1983,10 +1996,21 @@ async def _run_topic_discovery(session_id: str, analysis_type: str) -> None:
     """Background task: chunk documents, embed, and run BERTopic."""
     key = _job_key(session_id, analysis_type)
     try:
+        loop = asyncio.get_event_loop()
         session_dir = DATA_DIR / session_id
-        chunks = chunk_documents(session_dir)
-        embeddings = embed_chunks(chunks)
-        topics = run_topic_model(chunks, embeddings)
+        # All three functions are CPU/IO-bound synchronous calls. Running them in
+        # the thread pool keeps the event loop free to serve other users' requests
+        # while analysis is in progress. The semaphore prevents concurrent BERTopic
+        # runs from exhausting RAM on a small server.
+        async with _get_analysis_semaphore():
+            analysis_jobs[key]["phase"] = "chunking"
+            chunks = await loop.run_in_executor(None, chunk_documents, session_dir)
+            analysis_jobs[key]["phase"] = "embedding"
+            embeddings = await loop.run_in_executor(None, embed_chunks, chunks)
+            analysis_jobs[key]["phase"] = "modelling"
+            topics = await loop.run_in_executor(
+                None, run_topic_model, chunks, embeddings
+            )
 
         analysis_jobs[key]["topics"] = [
             {**t.model_dump(), "check_status": None, "result": None} for t in topics
@@ -2059,6 +2083,7 @@ async def start_inconsistency_analysis(
     analysis_jobs[_job_key(x_session_id, "inconsistencies")] = {
         "session_id": x_session_id,
         "status": "discovering",
+        "phase": None,
         "topics": [],
         "chunks": [],
         "created_at": time.time(),
@@ -2088,6 +2113,7 @@ async def get_inconsistency_analysis(
     ]
     return {
         "status": job["status"],
+        "phase": job.get("phase"),
         "topics": topics_out,
         "error": job["error"],
         "url_map": _get_url_map(x_session_id),
