@@ -890,10 +890,12 @@ docs/_linkcheck/
 *.xls
 *.xlsx
 
-# Next.js
+# Next.js (un-ignore frontend/lib/ which is caught by the Python lib/ pattern above)
+!frontend/lib/
 frontend/.next/
 frontend/out/
 frontend/.env*.local
 frontend/tsconfig.tsbuildinfo
+frontend/next-env.d.ts
 
 data/*

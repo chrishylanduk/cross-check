@@ -11,7 +11,7 @@ import numpy as np
 from bertopic import BERTopic
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import CountVectorizer
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 ANALYSIS_MODEL = os.getenv("ANALYSIS_MODEL", "openai:gpt-4.1-mini")
 
 
-def _make_model() -> str | OpenAIModel:
+def _make_model() -> str | OpenAIChatModel:
     """Return a pydantic-ai model.
 
     If OPENAI_BASE_URL is set, a custom AsyncOpenAI client is used — this covers
@@ -33,7 +33,7 @@ def _make_model() -> str | OpenAIModel:
     """
     if os.getenv("OPENAI_BASE_URL"):
         api_key = os.getenv("OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY")
-        return OpenAIModel(ANALYSIS_MODEL, provider=OpenAIProvider(api_key=api_key))
+        return OpenAIChatModel(ANALYSIS_MODEL, provider=OpenAIProvider(api_key=api_key))
     return ANALYSIS_MODEL
 
 
