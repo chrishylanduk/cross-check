@@ -174,8 +174,8 @@ function TopicRow({
             </button>
           )}
         </td>
-        <td className="govuk-table__cell govuk-table__cell--numeric">{topic.doc_count}</td>
-        <td className="govuk-table__cell govuk-table__cell--numeric">{topic.chunk_count}</td>
+        <td className="govuk-table__cell govuk-table__cell--numeric" data-label="Documents">{topic.doc_count}</td>
+        <td className="govuk-table__cell govuk-table__cell--numeric" data-label="Passages">{topic.chunk_count}</td>
         <td className="govuk-table__cell">
           {topic.check_status === null && (
             <button
@@ -224,7 +224,7 @@ function TopicRow({
       </tr>
 
       {showChunks && (
-        <tr className="govuk-table__row">
+        <tr className="govuk-table__row cc-expanded-row">
           <td
             className="govuk-table__cell"
             colSpan={4}
@@ -260,7 +260,7 @@ function TopicRow({
       )}
 
       {showResults && hasResult && (
-        <tr className="govuk-table__row">
+        <tr className="govuk-table__row cc-expanded-row">
           <td
             className="govuk-table__cell"
             colSpan={4}
@@ -541,12 +541,13 @@ export default function Inconsistencies() {
           })()}
 
           {job.topics.length > 0 && (
+            <div className="cc-responsive-table">
             <table className="govuk-table" style={{ tableLayout: 'fixed', width: '100%' }}>
               <colgroup>
                 <col />
-                <col style={{ width: '8em' }} />
-                <col style={{ width: '7em' }} />
-                <col style={{ width: '12em' }} />
+                <col style={{ width: '5em' }} />
+                <col style={{ width: '5em' }} />
+                <col style={{ width: '9em' }} />
               </colgroup>
               <thead className="govuk-table__head">
                 <tr className="govuk-table__row">
@@ -576,6 +577,7 @@ export default function Inconsistencies() {
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </>
       )}

@@ -102,16 +102,17 @@ export default function FileList({
         </>
       )}
 
+      <div className="cc-responsive-table">
       <table className="govuk-table">
         <thead className="govuk-table__head">
           <tr className="govuk-table__row">
             <th scope="col" className="govuk-table__header">
               File name
             </th>
-            <th scope="col" className="govuk-table__header govuk-table__header--numeric">
+            <th scope="col" className="govuk-table__header govuk-table__header--numeric" style={{ whiteSpace: 'nowrap' }}>
               Size
             </th>
-            <th scope="col" className="govuk-table__header govuk-table__header--numeric">
+            <th scope="col" className="govuk-table__header govuk-table__header--numeric" style={{ whiteSpace: 'nowrap' }}>
               Actions
             </th>
           </tr>
@@ -119,11 +120,11 @@ export default function FileList({
         <tbody className="govuk-table__body">
           {files.map((file, index) => (
             <tr key={index} className="govuk-table__row">
-              <td className="govuk-table__cell">{displayFilename(file.name)}</td>
-              <td className="govuk-table__cell govuk-table__cell--numeric">
+              <td className="govuk-table__cell" style={{ wordBreak: 'break-all' }}>{displayFilename(file.name)}</td>
+              <td className="govuk-table__cell govuk-table__cell--numeric" style={{ whiteSpace: 'nowrap' }} data-label="Size">
                 {formatBytes(file.size)}
               </td>
-              <td className="govuk-table__cell govuk-table__cell--numeric">
+              <td className="govuk-table__cell govuk-table__cell--numeric" style={{ whiteSpace: 'nowrap' }}>
                 <button
                   type="button"
                   className="govuk-link"
@@ -150,6 +151,7 @@ export default function FileList({
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   )
 }

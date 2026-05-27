@@ -331,7 +331,7 @@ function PageRow({ page, onCheck }: { page: Page; onCheck: (pageId: number) => v
       </tr>
 
       {showResults && hasResult && (
-        <tr className="govuk-table__row">
+        <tr className="govuk-table__row cc-expanded-row">
           <td
             className="govuk-table__cell"
             colSpan={2}
@@ -349,7 +349,7 @@ function PageRow({ page, onCheck }: { page: Page; onCheck: (pageId: number) => v
       )}
 
       {showContent && (
-        <tr className="govuk-table__row">
+        <tr className="govuk-table__row cc-expanded-row">
           <td
             className="govuk-table__cell"
             colSpan={2}
@@ -703,10 +703,11 @@ export default function Compliance() {
           )}
 
           {job.pages.length > 0 && (
+            <div className="cc-responsive-table">
             <table className="govuk-table" style={{ tableLayout: 'fixed', width: '100%' }}>
               <colgroup>
                 <col />
-                <col style={{ width: '14em' }} />
+                <col style={{ width: '9em' }} />
               </colgroup>
               <thead className="govuk-table__head">
                 <tr className="govuk-table__row">
@@ -724,6 +725,7 @@ export default function Compliance() {
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </>
       )}

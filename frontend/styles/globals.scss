@@ -120,6 +120,66 @@
   margin-top: auto;
 }
 
+/* Responsive tables: horizontal scroll on desktop, stacked cards on mobile */
+.cc-responsive-table {
+  overflow-x: auto;
+}
+
+@media (max-width: 40.0625em) {
+  .cc-responsive-table {
+    overflow-x: visible;
+  }
+
+  .cc-responsive-table table {
+    display: block;
+    width: 100%;
+  }
+
+  .cc-responsive-table thead {
+    display: none;
+  }
+
+  .cc-responsive-table tbody {
+    display: block;
+    width: 100%;
+  }
+
+  .cc-responsive-table tr {
+    display: block;
+    border: 1px solid #b1b4b6;
+    margin-bottom: 16px;
+    padding: 12px;
+  }
+
+  .cc-responsive-table tr.cc-expanded-row {
+    border: none;
+    padding: 0;
+    margin-top: -16px;
+    margin-bottom: 20px;
+  }
+
+  .cc-responsive-table td {
+    display: block;
+    border: none;
+    padding: 0 0 8px;
+    word-break: break-word;
+    text-align: left !important;
+  }
+
+  .cc-responsive-table td:last-child {
+    padding-bottom: 0;
+  }
+
+  .cc-responsive-table td::before {
+    content: attr(data-label);
+    display: block;
+    font-size: 14px;
+    font-weight: 700;
+    color: #505a5f;
+    margin-bottom: 2px;
+  }
+}
+
 /* Remove crown logo (not a real gov.uk service) */
 .govuk-header__logotype-crown,
 .govuk-footer__crown {
