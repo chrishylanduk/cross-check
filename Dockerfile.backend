@@ -13,6 +13,11 @@ COPY src/ ./src/
 # Install dependencies and package
 RUN uv sync --frozen --no-dev
 
+# Pre-download the embedding model so it is baked into the image.
+# HF_HOME is set here so the cache lands in a known location we can copy across.
+ENV HF_HOME=/app/.cache/huggingface
+RUN /app/.venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
 # Production stage
 FROM python:3.13-slim
 
@@ -21,8 +26,9 @@ WORKDIR /app
 # Create non-root user
 RUN useradd --system --no-create-home appuser
 
-# Copy virtual environment from builder
+# Copy virtual environment and pre-downloaded model cache from builder
 COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/.cache /app/.cache
 
 # Copy application code and guideline presets
 COPY src/ ./src/
@@ -30,14 +36,18 @@ COPY guidelines/ ./guidelines/
 
 # Create data directory for ephemeral storage and set ownership
 # Note: Uses container's ephemeral filesystem (free on Railway, limited to 100GB)
-RUN mkdir -p /app/data/collections && chown -R appuser /app/data
+RUN mkdir -p /app/data/collections \
+    && chown -R appuser /app/data /app/.cache
 
 # Set environment variables
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PORT=8000 \
-    PHOENIX_WORKING_DIR=/app/data/.phoenix
+    HF_HOME=/app/.cache/huggingface \
+    TORCH_HOME=/app/.cache/torch \
+    PHOENIX_WORKING_DIR=/app/data/.phoenix \
+    NUMBA_CACHE_DIR=/tmp/numba_cache
 
 USER appuser
 
@@ -45,7 +55,7 @@ USER appuser
 EXPOSE 8000
 
 # Health check (uses PORT env var if set)
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD ["/bin/sh", "-c", "/app/.venv/bin/python -c 'import urllib.request,os; urllib.request.urlopen(f\"http://localhost:{os.getenv(\"PORT\",\"8000\")}/health\").read()'"]
 
 # Run the application (reads PORT from environment)
