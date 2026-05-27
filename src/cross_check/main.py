@@ -26,7 +26,6 @@ import filetype
 import jwt
 from jwt import PyJWKClient
 from dotenv import load_dotenv
-from phoenix.otel import register as phoenix_register
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -215,6 +214,8 @@ def _configure_tracing() -> None:
     """Set up OpenTelemetry export to Arize Phoenix (if PHOENIX_ENDPOINT is set)."""
     if not PHOENIX_ENDPOINT:
         return
+    from phoenix.otel import register as phoenix_register
+
     tracer_provider = phoenix_register(
         project_name="cross-check",
         endpoint=f"{PHOENIX_ENDPOINT}/v1/traces",

@@ -36,7 +36,8 @@ RUN mkdir -p /app/data/collections && chown -R appuser /app/data
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PORT=8000
+    PORT=8000 \
+    PHOENIX_WORKING_DIR=/app/data/.phoenix
 
 USER appuser
 
