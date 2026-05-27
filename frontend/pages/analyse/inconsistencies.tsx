@@ -9,6 +9,29 @@ import Layout from '@/components/Layout'
 import { usePolling } from '@/hooks/usePolling'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000'
+
+function Spinner() {
+  return (
+    <>
+      <style>{`@keyframes cc-spin{to{transform:rotate(360deg)}}`}</style>
+      <span
+        aria-hidden="true"
+        style={{
+          display: 'inline-block',
+          width: '0.9em',
+          height: '0.9em',
+          border: '2px solid #b1b4b6',
+          borderTopColor: '#0b0c0c',
+          borderRadius: '50%',
+          animation: 'cc-spin 0.8s linear infinite',
+          verticalAlign: 'middle',
+          marginLeft: '8px',
+        }}
+      />
+    </>
+  )
+}
+
 const POLL_INTERVAL_MS = 2000
 
 interface RelevantPassage {
@@ -48,6 +71,7 @@ interface Topic {
 interface JobState {
   status: 'discovering' | 'topics_ready' | 'error'
   phase?: 'chunking' | 'embedding' | 'modelling' | null
+  chunk_count?: number | null
   topics: Topic[]
   error: string | null
   url_map?: Record<string, string>
@@ -451,15 +475,23 @@ export default function Inconsistencies() {
       )}
 
       {!startError && !job && (
-        <p className="govuk-body">Starting analysis&hellip;</p>
+        <p className="govuk-body">Starting analysis <Spinner /></p>
       )}
 
       {job?.status === 'discovering' && (
         <p className="govuk-body">
-          {job.phase === 'chunking' && 'Reading your documents…'}
-          {job.phase === 'embedding' && 'Analysing content…'}
-          {job.phase === 'modelling' && 'Grouping content into topics…'}
-          {!job.phase && 'Starting analysis…'}
+          {job.phase === 'chunking' && <>Reading your documents <Spinner /></>}
+          {job.phase === 'embedding' && (
+            job.chunk_count
+              ? <>Analysing {job.chunk_count} passages <Spinner /></>
+              : <>Analysing content <Spinner /></>
+          )}
+          {job.phase === 'modelling' && (
+            job.chunk_count
+              ? <>Grouping {job.chunk_count} passages into topics <Spinner /> <span className="govuk-body-s" style={{ color: '#505a5f' }}>(this may take a few minutes)</span></>
+              : <>Grouping content into topics <Spinner /> <span className="govuk-body-s" style={{ color: '#505a5f' }}>(this may take a few minutes)</span></>
+          )}
+          {!job.phase && <>Starting analysis <Spinner /></>}
         </p>
       )}
 

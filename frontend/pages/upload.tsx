@@ -78,6 +78,7 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl, demoAvailab
   const fileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
   const initialisingRef = useRef<boolean>(false)
+  const messageBannerRef = useRef<HTMLDivElement>(null)
 
   // Check data usage acceptance
   useEffect(() => {
@@ -86,6 +87,12 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl, demoAvailab
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setDataUsageAccepted(sessionStorage.getItem('data-usage-accepted') === 'true')
   }, [])
+
+  useEffect(() => {
+    if ((success || error) && messageBannerRef.current) {
+      messageBannerRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+  }, [success, error])
 
   // Re-initialise GOV.UK Frontend when form becomes visible
   useEffect(() => {
@@ -195,9 +202,7 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl, demoAvailab
       })
 
       if (response.ok) {
-        setSuccess(`Deleted ${filename}`)
         await fetchStorageInfo(sessionId as string)
-        setTimeout(() => setSuccess(null), 3000)
       } else {
         const data = await response.json()
         setError(data.detail || 'Failed to delete file')
@@ -225,7 +230,6 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl, demoAvailab
         setExpiresAt(null)
         setStorageInfo(null)
         setSuccess('All files deleted')
-        setTimeout(() => setSuccess(null), 3000)
       } else {
         // Just clear files
         const response = await fetch(`${API_BASE}/api/collection`, {
@@ -246,7 +250,6 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl, demoAvailab
           setExpiresAt(null)
           setStorageInfo(null)
           setSuccess('All files deleted')
-          setTimeout(() => setSuccess(null), 3000)
         } else {
           const data = await response.json()
           setError(data.detail || 'Failed to clear files')
@@ -370,10 +373,10 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl, demoAvailab
         }
       }
     } catch (err) {
+      setSuccess(null)
       setError((err as Error).message || 'Failed to load demo files')
     } finally {
       setLoadingDemo(false)
-      setSuccess(null)
     }
   }
 
@@ -466,10 +469,10 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl, demoAvailab
       if (fileInputRef.current) fileInputRef.current.value = ''
       if (folderInputRef.current) folderInputRef.current.value = ''
     } catch (err) {
+      setSuccess(null)
       setError((err as Error).message || 'Failed to upload files')
     } finally {
       setUploading(false)
-      setSuccess(null)
     }
   }
 
@@ -510,30 +513,32 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl, demoAvailab
             <>
               {!storageInfo?.finalised && (
                 <>
-                  {error && (
-                    <div className="govuk-error-summary" data-module="govuk-error-summary">
-                      <div role="alert">
-                        <h2 className="govuk-error-summary__title">There is a problem</h2>
-                        <div className="govuk-error-summary__body">
-                          <p>{error}</p>
+                  <div ref={messageBannerRef}>
+                    {error && (
+                      <div className="govuk-error-summary" data-module="govuk-error-summary">
+                        <div role="alert">
+                          <h2 className="govuk-error-summary__title">There is a problem</h2>
+                          <div className="govuk-error-summary__body">
+                            <p>{error}</p>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  )}
+                    )}
 
-                  {success && (
-                    <div
-                      className="govuk-notification-banner govuk-notification-banner--success"
-                      role="alert"
-                    >
-                      <div className="govuk-notification-banner__header">
-                        <h2 className="govuk-notification-banner__title">Success</h2>
+                    {success && (
+                      <div
+                        className="govuk-notification-banner govuk-notification-banner--success"
+                        role="alert"
+                      >
+                        <div className="govuk-notification-banner__header">
+                          <h2 className="govuk-notification-banner__title">Success</h2>
+                        </div>
+                        <div className="govuk-notification-banner__content">
+                          <p className="govuk-body">{success}</p>
+                        </div>
                       </div>
-                      <div className="govuk-notification-banner__content">
-                        <p className="govuk-body">{success}</p>
-                      </div>
-                    </div>
-                  )}
+                    )}
+                  </div>
 
                   {rejectedFiles.length > 0 && (
                     <div className="govuk-inset-text">

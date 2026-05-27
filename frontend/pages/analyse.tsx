@@ -10,15 +10,15 @@ interface AnalysisOption {
 
 const options: AnalysisOption[] = [
   {
-    title: 'Consistency',
-    description: 'Find where documents contradict each other or cover the same topic inconsistently.',
-    href: '/analyse/inconsistencies',
-    available: true,
-  },
-  {
     title: 'Compliance',
     description: 'Check whether your content follows your organisation\'s content guidelines and style guides.',
     href: '/analyse/compliance',
+    available: true,
+  },
+  {
+    title: 'Consistency',
+    description: 'Find where documents contradict each other or cover the same topic inconsistently.',
+    href: '/analyse/inconsistencies',
     available: true,
   },
   {

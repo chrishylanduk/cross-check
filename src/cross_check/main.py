@@ -278,17 +278,28 @@ async def lifespan(app: FastAPI):
 
     # Pre-warm the embedding model so it is loaded into memory before the first request
     loop = asyncio.get_event_loop()
+    logger.info("Loading embedding model…")
     await loop.run_in_executor(None, get_embedding_model)
+    logger.info("Embedding model ready")
 
-    # Cache demo files to disk so they are served instantly without a B2 round-trip,
-    # then pre-convert all files to markdown in the background so demo loads are fast.
+    # Download demo files from B2 (blocking — must complete before serving begins).
+    # File conversion and topic pre-computation continue in the background after startup.
     if B2_DEMO_ENABLED:
+        logger.info("Downloading demo files from B2…")
         await _warm_demo_cache()
         asyncio.create_task(_process_demo_zip())
+        logger.info(
+            "Demo conversion + topic pre-computation running in background "
+            "(watch for 'Fully ready' log below)"
+        )
 
     # Start background eviction loop
     asyncio.create_task(session_cleanup_loop())
-    logger.info("Session cleanup loop started (runs every 5 minutes)")
+    logger.info("=" * 60)
+    logger.info(
+        "Cross-check API accepting requests"
+        + (" — demo cache warming in background" if B2_DEMO_ENABLED else "")
+    )
     logger.info("=" * 60)
 
     yield
@@ -1352,6 +1363,11 @@ _DEMO_CACHE_DIR = _DATA_ROOT / "demo_cache"
 _DEMO_ZIP_CACHE = _DEMO_CACHE_DIR / "demo.zip"
 _DEMO_TOML_CACHE = _DEMO_CACHE_DIR / "demo.toml"
 _DEMO_PROCESSED_DIR = _DEMO_CACHE_DIR / "processed"
+_DEMO_TOPICS_CACHE = _DEMO_CACHE_DIR / "demo_topics.json"
+
+# SHA-256 of sorted demo filenames — set once after startup pre-processing completes.
+# Used to detect unmodified demo sessions eligible for the pre-computed topic cache.
+_demo_fileset_hash: str | None = None
 
 # In-memory stores for background jobs: job_id -> status dict
 _demo_jobs: dict[str, dict] = {}
@@ -1511,6 +1527,126 @@ async def _process_demo_zip() -> None:
     logger.info(
         f"Demo pre-processing complete: {saved}/{len(entries)} files ready in cache"
     )
+    await _precompute_demo_topics()
+
+
+async def _precompute_demo_topics() -> None:
+    """Chunk, embed, and run BERTopic on the demo markdown files once at startup.
+
+    Subsequent inconsistency analyses on unmodified demo sessions skip topic
+    discovery entirely and load results from _DEMO_TOPICS_CACHE instead.
+    """
+    global _demo_fileset_hash
+
+    if not _DEMO_PROCESSED_DIR.exists():
+        logger.info("=" * 60)
+        logger.info("Cross-check fully ready (no demo files)")
+        logger.info("=" * 60)
+        return
+    md_files = sorted(_DEMO_PROCESSED_DIR.glob("*.md"))
+    if not md_files:
+        logger.info("=" * 60)
+        logger.info("Cross-check fully ready (demo directory empty)")
+        logger.info("=" * 60)
+        return
+
+    _demo_fileset_hash = hashlib.sha256(
+        "|".join(f.name for f in md_files).encode()
+    ).hexdigest()
+
+    # Validate existing cache — reuse if the fileset hasn't changed.
+    if _DEMO_TOPICS_CACHE.exists():
+        try:
+            cached = json.loads(_DEMO_TOPICS_CACHE.read_text(encoding="utf-8"))
+            if cached.get("fileset_hash") == _demo_fileset_hash:
+                logger.info("=" * 60)
+                logger.info(
+                    f"Cross-check fully ready — demo topic cache valid "
+                    f"({len(cached['topics'])} topics, {len(cached['chunks'])} chunks)"
+                )
+                logger.info("=" * 60)
+                return
+        except Exception:
+            pass
+        _DEMO_TOPICS_CACHE.unlink(missing_ok=True)
+
+    logger.info(
+        f"Pre-computing demo topics for {len(md_files)} markdown files "
+        "(chunking → embedding → BERTopic)…"
+    )
+    loop = asyncio.get_event_loop()
+    try:
+        async with _get_analysis_semaphore():
+            logger.info("Demo topics: chunking…")
+            chunks = await loop.run_in_executor(
+                None, chunk_documents, _DEMO_PROCESSED_DIR
+            )
+            logger.info(f"Demo topics: embedding {len(chunks)} chunks…")
+            embeddings = await loop.run_in_executor(None, embed_chunks, chunks)
+            logger.info("Demo topics: running BERTopic…")
+            topics = await loop.run_in_executor(
+                None, run_topic_model, chunks, embeddings
+            )
+
+        _DEMO_TOPICS_CACHE.write_text(
+            json.dumps(
+                {
+                    "fileset_hash": _demo_fileset_hash,
+                    "chunks": [c.model_dump() for c in chunks],
+                    "topics": [
+                        {**t.model_dump(), "check_status": None, "result": None}
+                        for t in topics
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        logger.info("=" * 60)
+        logger.info(
+            f"Cross-check fully ready — demo topics cached "
+            f"({len(topics)} topics, {len(chunks)} chunks); "
+            "unmodified demo sessions will skip topic discovery"
+        )
+        logger.info("=" * 60)
+    except Exception as exc:
+        logger.warning(f"Demo topics pre-computation failed: {exc}")
+        logger.info("=" * 60)
+        logger.info(
+            "Cross-check fully ready (demo topic cache unavailable — will compute on demand)"
+        )
+        logger.info("=" * 60)
+
+
+def _session_matches_demo(session_id: str) -> bool:
+    """Return True if the session's markdown files exactly match the demo fileset."""
+    if _demo_fileset_hash is None:
+        return False
+    session_dir = DATA_DIR / session_id
+    session_files = sorted(f.name for f in session_dir.glob("*.md"))
+    session_hash = hashlib.sha256("|".join(session_files).encode()).hexdigest()
+    return session_hash == _demo_fileset_hash
+
+
+def _load_demo_topics_into_job(key: str) -> bool:
+    """Populate analysis_jobs[key] from the pre-computed demo cache. Returns True on success."""
+    if not _DEMO_TOPICS_CACHE.exists():
+        return False
+    try:
+        cached = json.loads(_DEMO_TOPICS_CACHE.read_text(encoding="utf-8"))
+        if cached.get("fileset_hash") != _demo_fileset_hash:
+            return False
+        analysis_jobs[key].update(
+            {
+                "status": "topics_ready",
+                "chunk_count": len(cached["chunks"]),
+                "chunks": cached["chunks"],
+                "topics": cached["topics"],
+            }
+        )
+        return True
+    except Exception as exc:
+        logger.warning(f"Failed to load demo topics cache: {exc}")
+        return False
 
 
 async def _run_demo_load_from_cache(
@@ -2004,10 +2140,16 @@ async def _run_topic_discovery(session_id: str, analysis_type: str) -> None:
         # runs from exhausting RAM on a small server.
         async with _get_analysis_semaphore():
             analysis_jobs[key]["phase"] = "chunking"
+            logger.info(f"Topic discovery: chunking | {key[:16]}...")
             chunks = await loop.run_in_executor(None, chunk_documents, session_dir)
+            analysis_jobs[key]["chunk_count"] = len(chunks)
             analysis_jobs[key]["phase"] = "embedding"
+            logger.info(
+                f"Topic discovery: embedding {len(chunks)} chunks | {key[:16]}..."
+            )
             embeddings = await loop.run_in_executor(None, embed_chunks, chunks)
             analysis_jobs[key]["phase"] = "modelling"
+            logger.info(f"Topic discovery: running BERTopic | {key[:16]}...")
             topics = await loop.run_in_executor(
                 None, run_topic_model, chunks, embeddings
             )
@@ -2080,7 +2222,8 @@ async def start_inconsistency_analysis(
             status_code=400, detail="Collection must be finalised before analysis"
         )
 
-    analysis_jobs[_job_key(x_session_id, "inconsistencies")] = {
+    key = _job_key(x_session_id, "inconsistencies")
+    analysis_jobs[key] = {
         "session_id": x_session_id,
         "status": "discovering",
         "phase": None,
@@ -2089,6 +2232,14 @@ async def start_inconsistency_analysis(
         "created_at": time.time(),
         "error": None,
     }
+
+    # Fast path: unmodified demo session — serve pre-computed topics instantly.
+    if _session_matches_demo(x_session_id) and _load_demo_topics_into_job(key):
+        logger.info(
+            f"Inconsistencies analysis: demo cache hit for session {x_session_id[:8]}... "
+            f"({len(analysis_jobs[key]['topics'])} topics loaded instantly)"
+        )
+        return {"status": "started"}
 
     asyncio.create_task(_run_topic_discovery(x_session_id, "inconsistencies"))
     logger.info(f"Inconsistencies analysis started for session {x_session_id[:8]}...")
@@ -2114,6 +2265,7 @@ async def get_inconsistency_analysis(
     return {
         "status": job["status"],
         "phase": job.get("phase"),
+        "chunk_count": job.get("chunk_count"),
         "topics": topics_out,
         "error": job["error"],
         "url_map": _get_url_map(x_session_id),

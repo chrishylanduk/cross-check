@@ -15,7 +15,7 @@ export default clerkMiddleware(async (auth, req) => {
 
   if (!userId) {
     return NextResponse.redirect(
-      new URL(`/sign-in?redirect_url=${encodeURIComponent(req.url)}`, req.url)
+      new URL(`/sign-up?redirect_url=${encodeURIComponent(req.url)}`, req.url)
     )
   }
 

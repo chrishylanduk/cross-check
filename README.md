@@ -1,6 +1,6 @@
 # Cross-check
 
-> **This is a personal learning and development project, and is a very early prototype.** Much of this code is AI-generated. It should not be used for production purposes or with sensitive data without independent review.
+> **This is a personal learning and development project, and is a very early prototype. It is not associated with any organisation.** Much of this code is AI-generated and has not been fully reviewed. It is unlikely to be suitable for real deployment yet.
 
 Automatically recommend improvements to a large collection of written content (e.g. a website or intranet) to improve its consistency, clarity, compliance and completeness. Save hours or days compared to a manual content audit.
 
@@ -16,11 +16,14 @@ Automatically recommend improvements to a large collection of written content (e
 
 - Python 3.13+
 - Node.js 18+ and npm
-- A `.env` file — copy `.env.example` and fill in your values:
+- Two `.env` files — one for the backend, one for the frontend:
 
 ```shell
 cp .env.example .env
+cp frontend/.env.example frontend/.env
 ```
+
+At minimum, set `PROTOTYPE_PASSWORD` and `OPENAI_API_KEY` in `.env`. The frontend `.env` works out of the box for local development.
 
 ### Installing dependencies
 
@@ -206,8 +209,6 @@ These options correspond directly to the **HTML processing options** controls on
 
 ## Docker Deployment
 
-This project uses hardened Chainguard base images for security.
-
 ### Build and run with Docker Compose
 
 ```shell
@@ -225,7 +226,6 @@ When deploying to platforms like Railway:
 1. **Backend service**:
    - Set `CORS_ORIGINS` to your frontend URL(s)
    - Platform will set `PORT` automatically
-   - Set `PERSISTENT_STORAGE_WARNING_DISABLED=true`
 
 2. **Frontend service**:
    - Set `NEXT_PUBLIC_API_BASE` to your backend service URL
@@ -233,7 +233,7 @@ When deploying to platforms like Railway:
 
 3. **Storage**:
    - Files are stored on ephemeral disk (free on Railway, 100GB limit)
-   - Sessions expire after 1 hour, files are cleaned up automatically
+   - Sessions expire after 24 hours; files are cleaned up automatically
    - No persistent volumes needed for this use case
 
 ### Build individual containers
