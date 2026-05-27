@@ -337,23 +337,43 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl, demoAvailab
         const data = await response.json().catch(() => ({}))
         throw new Error(data.detail || `Failed to load demo files (${response.status})`)
       }
-      const result = await response.json()
-      if (result.rejected_files?.length > 0) {
-        setRejectedFiles(result.rejected_files)
+      const { job_id } = await response.json()
+
+      // Poll until the background job completes
+      while (true) {
+        await new Promise((r) => setTimeout(r, 2000))
+        const statusRes = await fetch(`${API_BASE}/api/demo/status/${job_id}`, {
+          headers: { 'X-Session-ID': sessionId as string, ...authHeaders },
+        })
+        if (!statusRes.ok) throw new Error('Lost track of demo load job')
+        const job = await statusRes.json()
+
+        if (job.status === 'error') throw new Error(job.error || 'Demo load failed')
+
+        if (job.status === 'complete') {
+          if (job.rejected_files?.length > 0) setRejectedFiles(job.rejected_files)
+          if (job.file_count > 0) {
+            sessionStorage.setItem('cross-check-has-files', 'true')
+            setSuccess(
+              `${job.file_count} demo file${job.file_count !== 1 ? 's' : ''} loaded successfully`,
+            )
+          } else {
+            setError('No demo files could be loaded. Check the list below for details.')
+          }
+          await fetchStorageInfo(sessionId as string)
+          break
+        }
+
+        // Still processing — update button label with progress
+        if (job.total > 0) {
+          setSuccess(`Loading… ${job.processed}/${job.total} files`)
+        }
       }
-      if (result.file_count > 0) {
-        sessionStorage.setItem('cross-check-has-files', 'true')
-        setSuccess(
-          `${result.file_count} demo file${result.file_count !== 1 ? 's' : ''} loaded successfully`,
-        )
-      } else if (result.rejected_files?.length > 0) {
-        setError('No demo files could be loaded. Check the list below for details.')
-      }
-      await fetchStorageInfo(sessionId as string)
     } catch (err) {
       setError((err as Error).message || 'Failed to load demo files')
     } finally {
       setLoadingDemo(false)
+      setSuccess(null)
     }
   }
 
@@ -410,31 +430,46 @@ export default function Upload({ aiProviderName, aiPrivacyPolicyUrl, demoAvailab
         throw new Error(errorData.detail || `Upload failed with status ${response.status}`)
       }
 
-      const result = await response.json()
+      const { job_id } = await response.json()
 
-      if (result.rejected_files?.length > 0) {
-        setRejectedFiles(result.rejected_files)
-      }
+      // Poll until background conversion completes
+      while (true) {
+        await new Promise((r) => setTimeout(r, 2000))
+        const statusRes = await fetch(`${API_BASE}/api/upload/status/${job_id}`, {
+          headers: { 'X-Session-ID': sessionId as string, ...authHeaders },
+        })
+        if (!statusRes.ok) throw new Error('Lost track of upload job')
+        const job = await statusRes.json()
 
-      if (result.file_count > 0) {
-        sessionStorage.setItem('cross-check-has-files', 'true')
-        setSuccess(
-          `${result.file_count} file${result.file_count !== 1 ? 's' : ''} uploaded successfully`,
-        )
-      } else if (result.rejected_files?.length > 0) {
-        setError('No files could be uploaded. Check the list below for details.')
+        if (job.status === 'error') throw new Error(job.error || 'Upload failed')
+
+        if (job.status === 'complete') {
+          if (job.rejected_files?.length > 0) setRejectedFiles(job.rejected_files)
+          if (job.file_count > 0) {
+            sessionStorage.setItem('cross-check-has-files', 'true')
+            setSuccess(
+              `${job.file_count} file${job.file_count !== 1 ? 's' : ''} uploaded successfully`,
+            )
+          } else if (job.rejected_files?.length > 0) {
+            setError('No files could be uploaded. Check the list below for details.')
+          }
+          await fetchStorageInfo(sessionId as string)
+          break
+        }
+
+        if (job.total > 0) {
+          setSuccess(`Processing… ${job.processed}/${job.total} files`)
+        }
       }
 
       // Clear file inputs
       if (fileInputRef.current) fileInputRef.current.value = ''
       if (folderInputRef.current) folderInputRef.current.value = ''
-
-      // Update storage info
-      await fetchStorageInfo(sessionId as string)
     } catch (err) {
       setError((err as Error).message || 'Failed to upload files')
     } finally {
       setUploading(false)
+      setSuccess(null)
     }
   }
 

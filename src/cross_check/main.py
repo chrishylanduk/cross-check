@@ -26,7 +26,16 @@ import filetype
 import jwt
 from jwt import PyJWKClient
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from markitdown import MarkItDown
@@ -271,9 +280,11 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, get_embedding_model)
 
-    # Cache demo files to disk so they are served instantly without a B2 round-trip
+    # Cache demo files to disk so they are served instantly without a B2 round-trip,
+    # then pre-convert all files to markdown in the background so demo loads are fast.
     if B2_DEMO_ENABLED:
         await _warm_demo_cache()
+        asyncio.create_task(_process_demo_zip())
 
     # Start background eviction loop
     asyncio.create_task(session_cleanup_loop())
@@ -305,8 +316,8 @@ class PasswordValidationRequest(BaseModel):
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     """Enforce authentication on all requests except health and root."""
-    # Always allow health check and root
-    if request.url.path in ["/health", "/"]:
+    # Always allow health check, root, and public config (no user data)
+    if request.url.path in ["/health", "/", "/api/config"]:
         return await call_next(request)
 
     if CLERK_ENABLED:
@@ -816,16 +827,130 @@ async def create_session_endpoint(request: Request):
     }
 
 
+async def _run_upload_processing(
+    job_id: str,
+    session_id: str,
+    session_dir: Path,
+    pending: list[dict],
+    strip_before_h1: bool,
+    footer_cutoff: str,
+    current_usage: int,
+) -> None:
+    """Convert uploaded temp files to markdown concurrently, updating _upload_jobs[job_id]."""
+    job = _upload_jobs[job_id]
+    job["total"] = len(pending)
+    loop = asyncio.get_event_loop()
+    sem = asyncio.Semaphore(os.cpu_count() or 4)
+
+    saved_files: list[dict] = []
+    rejected_files: list[dict] = []
+    total_new_size = 0
+
+    async def _process_one(item: dict) -> None:
+        nonlocal total_new_size
+        temp_path = Path(item["temp_path"])
+        original_name = item["original_name"]
+        safe_filename = item["safe_filename"]
+        mime_type = item["mime_type"]
+        content_len = item["content_len"]
+
+        if current_usage + total_new_size + content_len > MAX_STORAGE_PER_SESSION:
+            rejected_files.append(
+                {"name": original_name, "reason": "Storage quota exceeded"}
+            )
+            job["processed"] += 1
+            return
+
+        async with sem:
+            try:
+                result = await loop.run_in_executor(
+                    None, md_converter.convert, str(temp_path)
+                )
+                markdown_content = result.text_content
+                markdown_content = markdown_content.replace(" ", " ")
+
+                if not markdown_content or not markdown_content.strip():
+                    raise ValueError("Conversion produced empty content")
+
+                if mime_type == "text/html":
+                    if strip_before_h1:
+                        markdown_content = _strip_before_first_h1(markdown_content)
+                    if footer_cutoff:
+                        markdown_content = _strip_after_last_occurrence(
+                            markdown_content, footer_cutoff
+                        )
+
+                if not markdown_content or not markdown_content.strip():
+                    rejected_files.append(
+                        {
+                            "name": original_name,
+                            "reason": "Processing options removed all content",
+                        }
+                    )
+                    job["processed"] += 1
+                    return
+
+                md_filename = safe_filename + ".md"
+                md_path = session_dir / md_filename
+                async with aiofiles.open(md_path, "w", encoding="utf-8") as f:
+                    await f.write(markdown_content)
+
+                metadata: dict = {}
+                if mime_type == "text/html":
+                    og_url = _extract_og_url(temp_path.read_bytes())
+                    if og_url:
+                        metadata["url"] = og_url
+                async with aiofiles.open(
+                    str(md_path) + ".metadata", "w", encoding="utf-8"
+                ) as f:
+                    await f.write(json.dumps(metadata))
+
+                file_size = md_path.stat().st_size
+                total_new_size += file_size
+                saved_files.append({"name": md_filename, "size": file_size})
+
+            except Exception as e:
+                rejected_files.append(
+                    {
+                        "name": original_name,
+                        "reason": f"Processing failed: {type(e).__name__}",
+                    }
+                )
+            finally:
+                if temp_path.exists():
+                    temp_path.unlink()
+
+        job["processed"] += 1
+
+    await asyncio.gather(*[_process_one(item) for item in pending])
+
+    logger.info(
+        f"Upload complete | Session: {session_id[:8]}... | "
+        f"Saved: {len(saved_files)} | Rejected: {len(rejected_files)}"
+    )
+    job.update(
+        {
+            "status": "complete",
+            "file_count": len(saved_files),
+            "files": saved_files,
+            "rejected_files": rejected_files,
+            "storage_used": current_usage + total_new_size,
+            "storage_limit": MAX_STORAGE_PER_SESSION,
+        }
+    )
+
+
 @app.post("/api/upload")
 @limiter.limit("20/minute")
 async def upload_files(
     request: Request,
+    background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
     x_session_id: str = Header(..., alias="X-Session-ID"),
     strip_before_h1: bool = Form(False),
     footer_cutoff: str = Form(""),
 ):
-    """Upload content files to user's collection."""
+    """Upload content files to user's collection. Returns a job_id to poll via /api/upload/status/{job_id}."""
     client_ip = get_remote_address(request)
     logger.info(
         f"Upload request | Session: {x_session_id[:8] if x_session_id else 'None'}... | "
@@ -862,90 +987,57 @@ async def upload_files(
             detail=f"Maximum {MAX_FILES_PER_UPLOAD} files per upload",
         )
 
-    # Check current storage usage (from disk)
     current_usage = get_session_storage_usage(x_session_id)
-
-    # Get session directory
     session_dir = DATA_DIR / x_session_id
 
-    # Process uploaded files
-    saved_files = []
-    rejected_files = []
-    total_new_size = 0
+    # Read and validate all files from the request body synchronously before returning.
+    # Conversion happens in the background so the HTTP connection is freed immediately.
+    pending: list[dict] = []
+    immediate_rejected: list[dict] = []
+    running_size = 0
 
     for file in files:
-        if not file.filename:
+        if not file.filename or _is_ignored_path(file.filename):
             continue
 
-        if _is_ignored_path(file.filename):
-            continue
-
-        logger.info(f"Processing file: {file.filename}")
-
-        # Skip files with names that are too long
         if len(file.filename) > MAX_FILENAME_LENGTH:
-            logger.warning(f"Filename too long: {file.filename}")
-            rejected_files.append(
+            immediate_rejected.append(
                 {"name": file.filename, "reason": "Filename is too long"}
             )
             continue
 
-        # Read file content
         content = await file.read()
-        logger.info(f"File {file.filename}: size={len(content)} bytes")
 
-        # Validate file size
         if len(content) > MAX_FILE_SIZE:
-            logger.warning(
-                f"File {file.filename} exceeds size limit: {len(content)} bytes"
-            )
-            rejected_files.append(
+            immediate_rejected.append(
                 {"name": file.filename, "reason": "File exceeds the 50MB size limit"}
             )
             continue
 
-        # Check storage quota (abort entire request — not a per-file skip)
-        if current_usage + total_new_size + len(content) > MAX_STORAGE_PER_SESSION:
-            logger.warning(f"Storage quota exceeded for session {x_session_id}")
+        if current_usage + running_size + len(content) > MAX_STORAGE_PER_SESSION:
             raise HTTPException(
                 status_code=507,
                 detail=f"Storage quota exceeded. Maximum {MAX_STORAGE_PER_SESSION / 1024 / 1024}MB per session",
             )
 
-        # Validate MIME type (hybrid approach)
         kind = filetype.guess(content)
-
         if kind is not None:
-            # Binary file detected by magic number
             mime_type = kind.mime
-            logger.info(
-                f"File {file.filename}: detected MIME type={mime_type} (magic number)"
-            )
         else:
-            # Fallback to extension-based detection for text files
             guessed_mime, _ = mimetypes.guess_type(file.filename)
             if guessed_mime is None:
-                logger.warning(f"File {file.filename}: Unable to determine MIME type")
-                rejected_files.append(
+                immediate_rejected.append(
                     {"name": file.filename, "reason": "File type not recognised"}
                 )
                 continue
             mime_type = guessed_mime
-            logger.info(
-                f"File {file.filename}: detected MIME type={mime_type} (extension)"
-            )
 
         if mime_type not in ALLOWED_MIME_TYPES:
-            logger.warning(
-                f"File {file.filename}: MIME type {mime_type} not in allowed list"
-            )
-            rejected_files.append(
+            immediate_rejected.append(
                 {"name": file.filename, "reason": "File type not supported"}
             )
             continue
 
-        # Sanitise filename to prevent issues; replace path separators with a
-        # dash before sanitising so folder structure is readable in the filename
         raw_filename = file.filename.replace("\\", "/")
         path_parts = [p for p in raw_filename.split("/") if p]
         joined = "-".join(path_parts) if len(path_parts) > 1 else raw_filename
@@ -953,86 +1045,61 @@ async def upload_files(
         if not safe_filename:
             raise HTTPException(status_code=400, detail="Invalid filename")
 
-        # Write content to temporary file for conversion
         temp_path = session_dir / f"temp_{secrets.token_hex(8)}_{safe_filename}"
-        try:
-            async with aiofiles.open(temp_path, "wb") as f:
-                await f.write(content)
+        async with aiofiles.open(temp_path, "wb") as f:
+            await f.write(content)
 
-            # Convert to markdown for security
-            try:
-                result = md_converter.convert(str(temp_path))
-                markdown_content = result.text_content
+        running_size += len(content)
+        pending.append(
+            {
+                "temp_path": str(temp_path),
+                "original_name": file.filename,
+                "safe_filename": safe_filename,
+                "mime_type": mime_type,
+                "content_len": len(content),
+            }
+        )
 
-                # Normalise non-breaking spaces to regular spaces
-                markdown_content = markdown_content.replace(" ", " ")
+    logger.info(
+        f"Upload received | Session: {x_session_id[:8]}... | "
+        f"Queued: {len(pending)} | Pre-rejected: {len(immediate_rejected)}"
+    )
 
-                # Validate markdown output
-                if not markdown_content or not markdown_content.strip():
-                    raise ValueError("Conversion resulted in empty content")
-
-                # Apply HTML-specific post-processing
-                if mime_type == "text/html":
-                    if strip_before_h1:
-                        markdown_content = _strip_before_first_h1(markdown_content)
-                    if footer_cutoff:
-                        markdown_content = _strip_after_last_occurrence(
-                            markdown_content, footer_cutoff
-                        )
-
-                # Re-validate after processing (options could strip all content)
-                if not markdown_content or not markdown_content.strip():
-                    raise ValueError(
-                        "Processing options removed all content from the file"
-                    )
-
-            except Exception as conv_error:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Failed to convert file to markdown: {type(conv_error).__name__}",
-                )
-
-            # Save as markdown to disk
-            md_filename = safe_filename + ".md"
-            md_path = session_dir / md_filename
-
-            async with aiofiles.open(md_path, "w", encoding="utf-8") as f:
-                await f.write(markdown_content)
-
-            # Extract and persist page metadata
-            metadata: dict = {}
-            if mime_type == "text/html":
-                og_url = _extract_og_url(content)
-                if og_url:
-                    metadata["url"] = og_url
-            metadata_path = session_dir / (md_filename + ".metadata")
-            async with aiofiles.open(metadata_path, "w", encoding="utf-8") as f:
-                await f.write(json.dumps(metadata))
-
-            file_size = md_path.stat().st_size
-            total_new_size += file_size
-            saved_files.append({"name": md_filename, "size": file_size})
-
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to process file: {type(e).__name__}",
-            )
-        finally:
-            # Clean up temporary file
-            if temp_path.exists():
-                temp_path.unlink()
-
-    return {
-        "message": "Files uploaded successfully",
-        "file_count": len(saved_files),
-        "files": saved_files,
-        "rejected_files": rejected_files,
-        "storage_used": current_usage + total_new_size,
-        "storage_limit": MAX_STORAGE_PER_SESSION,
+    job_id = secrets.token_hex(16)
+    _upload_jobs[job_id] = {
+        "status": "processing",
+        "processed": 0,
+        "total": len(pending),
+        "rejected_files": immediate_rejected,
+        "_session_id": x_session_id,
     }
+
+    background_tasks.add_task(
+        _run_upload_processing,
+        job_id,
+        x_session_id,
+        session_dir,
+        pending,
+        strip_before_h1,
+        footer_cutoff,
+        current_usage,
+    )
+
+    return {"job_id": job_id, "status": "processing"}
+
+
+@app.get("/api/upload/status/{job_id}")
+async def upload_status(
+    request: Request,
+    job_id: str,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+):
+    """Poll the status of an upload job started by /api/upload."""
+    validate_session(x_session_id, request)
+    job = _upload_jobs.get(job_id)
+    if job is None or job.get("_session_id") != x_session_id:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {k: v for k, v in job.items() if not k.startswith("_")}
 
 
 @app.get("/api/collection")
@@ -1284,6 +1351,11 @@ _B2_DEMO_CONFIG = "demo.toml"
 _DEMO_CACHE_DIR = _DATA_ROOT / "demo_cache"
 _DEMO_ZIP_CACHE = _DEMO_CACHE_DIR / "demo.zip"
 _DEMO_TOML_CACHE = _DEMO_CACHE_DIR / "demo.toml"
+_DEMO_PROCESSED_DIR = _DEMO_CACHE_DIR / "processed"
+
+# In-memory stores for background jobs: job_id -> status dict
+_demo_jobs: dict[str, dict] = {}
+_upload_jobs: dict[str, dict] = {}
 
 
 async def _b2_authorize(client: httpx.AsyncClient) -> dict:
@@ -1329,13 +1401,337 @@ async def _warm_demo_cache() -> None:
         )
 
 
+async def _process_demo_zip() -> None:
+    """Convert all files in the cached demo zip to markdown once at startup.
+
+    Subsequent demo loads copy from _DEMO_PROCESSED_DIR instead of converting,
+    making them near-instant regardless of how many files are in the archive.
+    Conversions run concurrently, bounded by CPU count.
+    """
+    if not _DEMO_ZIP_CACHE.exists():
+        return
+
+    _DEMO_PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+
+    strip_before_h1 = False
+    footer_cutoff = ""
+    if _DEMO_TOML_CACHE.exists():
+        try:
+            config = tomllib.loads(_DEMO_TOML_CACHE.read_text("utf-8"))
+            strip_before_h1 = bool(config.get("strip_before_h1", False))
+            footer_cutoff = str(config.get("footer_cutoff", ""))[
+                :MAX_FOOTER_CUTOFF_LENGTH
+            ]
+        except Exception:
+            pass
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(_DEMO_ZIP_CACHE.read_bytes()))
+    except zipfile.BadZipFile:
+        logger.warning("Demo zip is invalid — skipping pre-processing")
+        return
+
+    loop = asyncio.get_event_loop()
+    entries = [
+        e for e in zf.infolist() if not e.is_dir() and not _is_ignored_path(e.filename)
+    ]
+    sem = asyncio.Semaphore(os.cpu_count() or 4)
+
+    async def _convert_one(entry: zipfile.ZipInfo) -> bool:
+        file_name = entry.filename
+        parts = [p for p in file_name.replace("\\", "/").split("/") if p]
+        joined = "-".join(parts) if len(parts) > 1 else file_name
+        safe_filename = sanitize_filename(joined)
+        if not safe_filename:
+            return False
+
+        md_path = _DEMO_PROCESSED_DIR / (safe_filename + ".md")
+        if md_path.exists():
+            return True  # already processed from a previous startup
+
+        content = zf.read(entry)
+        if len(content) > MAX_FILE_SIZE:
+            return False
+
+        kind = filetype.guess(content)
+        mime_type = (
+            kind.mime
+            if kind is not None
+            else (mimetypes.guess_type(file_name)[0] or "")
+        )
+        if not mime_type or mime_type not in ALLOWED_MIME_TYPES:
+            return False
+
+        temp_path = _DEMO_PROCESSED_DIR / f"temp_{secrets.token_hex(8)}_{safe_filename}"
+        async with sem:
+            try:
+                async with aiofiles.open(temp_path, "wb") as f:
+                    await f.write(content)
+
+                result = await loop.run_in_executor(
+                    None, md_converter.convert, str(temp_path)
+                )
+                markdown_content = result.text_content
+                if not markdown_content or not markdown_content.strip():
+                    return False
+
+                if mime_type == "text/html":
+                    if strip_before_h1:
+                        markdown_content = _strip_before_first_h1(markdown_content)
+                    if footer_cutoff:
+                        markdown_content = _strip_after_last_occurrence(
+                            markdown_content, footer_cutoff
+                        )
+                if not markdown_content or not markdown_content.strip():
+                    return False
+
+                async with aiofiles.open(md_path, "w", encoding="utf-8") as f:
+                    await f.write(markdown_content)
+
+                metadata: dict = {}
+                if mime_type == "text/html":
+                    og_url = _extract_og_url(content)
+                    if og_url:
+                        metadata["url"] = og_url
+                async with aiofiles.open(
+                    str(md_path) + ".metadata", "w", encoding="utf-8"
+                ) as f:
+                    await f.write(json.dumps(metadata))
+
+                return True
+            except Exception as exc:
+                logger.warning(f"Demo pre-process failed for {file_name}: {exc}")
+                return False
+            finally:
+                if temp_path.exists():
+                    temp_path.unlink()
+
+    results = await asyncio.gather(*[_convert_one(e) for e in entries])
+    saved = sum(1 for r in results if r)
+    logger.info(
+        f"Demo pre-processing complete: {saved}/{len(entries)} files ready in cache"
+    )
+
+
+async def _run_demo_load_from_cache(
+    job_id: str,
+    session_id: str,
+    session_dir: Path,
+    current_usage: int,
+) -> None:
+    """Copy pre-processed markdown files from _DEMO_PROCESSED_DIR into the session directory."""
+    job = _demo_jobs[job_id]
+
+    md_files = sorted(_DEMO_PROCESSED_DIR.glob("*.md"))
+    job["total"] = len(md_files)
+
+    # Check quota up front using cached file sizes
+    total_size = sum(p.stat().st_size for p in md_files)
+    if current_usage + total_size > MAX_STORAGE_PER_SESSION:
+        job.update(
+            {
+                "status": "error",
+                "error": f"Storage quota exceeded. Maximum {MAX_STORAGE_PER_SESSION // 1024 // 1024}MB per session",
+            }
+        )
+        return
+
+    async def _copy_one(md_path: Path) -> dict:
+        content = md_path.read_bytes()
+        dest = session_dir / md_path.name
+        async with aiofiles.open(dest, "wb") as f:
+            await f.write(content)
+
+        meta_src = Path(str(md_path) + ".metadata")
+        meta_dest = session_dir / (md_path.name + ".metadata")
+        if meta_src.exists():
+            async with aiofiles.open(meta_dest, "wb") as f:
+                await f.write(meta_src.read_bytes())
+        else:
+            async with aiofiles.open(meta_dest, "w", encoding="utf-8") as f:
+                await f.write("{}")
+
+        job["processed"] += 1
+        return {"name": md_path.name, "size": dest.stat().st_size}
+
+    saved_files = await asyncio.gather(*[_copy_one(p) for p in md_files])
+
+    logger.info(
+        f"Demo load (cache) complete | Session: {session_id[:8]}... | Loaded: {len(saved_files)}"
+    )
+    job.update(
+        {
+            "status": "complete",
+            "file_count": len(saved_files),
+            "files": list(saved_files),
+            "rejected_files": [],
+            "storage_used": current_usage + total_size,
+            "storage_limit": MAX_STORAGE_PER_SESSION,
+        }
+    )
+
+
+async def _run_demo_load(
+    job_id: str,
+    session_id: str,
+    session_dir: Path,
+    zip_bytes: bytes,
+    strip_before_h1: bool,
+    footer_cutoff: str,
+    current_usage: int,
+) -> None:
+    """Process demo zip in the background, updating _demo_jobs[job_id] as work progresses."""
+    job = _demo_jobs[job_id]
+    saved_files: list[dict] = []
+    rejected_files: list[dict] = []
+    total_new_size = 0
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except zipfile.BadZipFile:
+        job.update({"status": "error", "error": "Demo archive is not a valid zip file"})
+        return
+
+    entries = [
+        e for e in zf.infolist() if not e.is_dir() and not _is_ignored_path(e.filename)
+    ]
+    job["total"] = len(entries)
+    loop = asyncio.get_event_loop()
+
+    for entry in entries:
+        file_name = entry.filename
+        parts = [p for p in file_name.replace("\\", "/").split("/") if p]
+        joined = "-".join(parts) if len(parts) > 1 else file_name
+        safe_filename = sanitize_filename(joined)
+        if not safe_filename:
+            rejected_files.append({"name": file_name, "reason": "Invalid filename"})
+            job["processed"] += 1
+            continue
+
+        content = zf.read(entry)
+
+        if len(content) > MAX_FILE_SIZE:
+            rejected_files.append(
+                {"name": file_name, "reason": "File exceeds the 50MB size limit"}
+            )
+            job["processed"] += 1
+            continue
+
+        if current_usage + total_new_size + len(content) > MAX_STORAGE_PER_SESSION:
+            job.update(
+                {
+                    "status": "error",
+                    "error": f"Storage quota exceeded. Maximum {MAX_STORAGE_PER_SESSION // 1024 // 1024}MB per session",
+                }
+            )
+            return
+
+        kind = filetype.guess(content)
+        if kind is not None:
+            mime_type = kind.mime
+        else:
+            guessed_mime, _ = mimetypes.guess_type(file_name)
+            if guessed_mime is None:
+                rejected_files.append(
+                    {"name": file_name, "reason": "File type not recognised"}
+                )
+                job["processed"] += 1
+                continue
+            mime_type = guessed_mime
+
+        if mime_type not in ALLOWED_MIME_TYPES:
+            rejected_files.append(
+                {"name": file_name, "reason": "File type not supported"}
+            )
+            job["processed"] += 1
+            continue
+
+        temp_path = session_dir / f"temp_{secrets.token_hex(8)}_{safe_filename}"
+        try:
+            async with aiofiles.open(temp_path, "wb") as f:
+                await f.write(content)
+
+            # md_converter.convert is blocking — run in thread pool
+            result = await loop.run_in_executor(
+                None, md_converter.convert, str(temp_path)
+            )
+            markdown_content = result.text_content
+            markdown_content = markdown_content.replace(" ", " ")
+
+            if not markdown_content or not markdown_content.strip():
+                raise ValueError("Conversion produced empty content")
+
+            if mime_type == "text/html":
+                if strip_before_h1:
+                    markdown_content = _strip_before_first_h1(markdown_content)
+                if footer_cutoff:
+                    markdown_content = _strip_after_last_occurrence(
+                        markdown_content, footer_cutoff
+                    )
+
+            if not markdown_content or not markdown_content.strip():
+                rejected_files.append(
+                    {
+                        "name": file_name,
+                        "reason": "Processing options removed all content",
+                    }
+                )
+                job["processed"] += 1
+                continue
+
+            md_filename = safe_filename + ".md"
+            md_path = session_dir / md_filename
+
+            async with aiofiles.open(md_path, "w", encoding="utf-8") as f:
+                await f.write(markdown_content)
+
+            metadata: dict = {}
+            if mime_type == "text/html":
+                og_url = _extract_og_url(content)
+                if og_url:
+                    metadata["url"] = og_url
+            meta_path = session_dir / (md_filename + ".metadata")
+            async with aiofiles.open(meta_path, "w", encoding="utf-8") as f:
+                await f.write(json.dumps(metadata))
+
+            file_size = md_path.stat().st_size
+            total_new_size += file_size
+            saved_files.append({"name": md_filename, "size": file_size})
+
+        except Exception as e:
+            rejected_files.append(
+                {"name": file_name, "reason": f"Processing failed: {type(e).__name__}"}
+            )
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+
+        job["processed"] += 1
+
+    logger.info(
+        f"Demo load complete | Session: {session_id[:8]}... | "
+        f"Loaded: {len(saved_files)} | Rejected: {len(rejected_files)}"
+    )
+    job.update(
+        {
+            "status": "complete",
+            "file_count": len(saved_files),
+            "files": saved_files,
+            "rejected_files": rejected_files,
+            "storage_used": current_usage + total_new_size,
+            "storage_limit": MAX_STORAGE_PER_SESSION,
+        }
+    )
+
+
 @app.post("/api/demo/load")
 @limiter.limit("3/minute")
 async def load_demo_files(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_session_id: str = Header(..., alias="X-Session-ID"),
 ):
-    """Download demo.zip from B2, unzip it, and add files to the session collection."""
+    """Start a background job to load demo files. Poll /api/demo/status/{job_id} for progress."""
     if not B2_DEMO_ENABLED:
         raise HTTPException(status_code=404, detail="Demo files not configured")
 
@@ -1350,6 +1746,26 @@ async def load_demo_files(
     session_dir = DATA_DIR / x_session_id
     current_usage = get_session_storage_usage(x_session_id)
 
+    job_id = secrets.token_hex(16)
+    _demo_jobs[job_id] = {
+        "status": "processing",
+        "processed": 0,
+        "total": 0,
+        "_session_id": x_session_id,
+    }
+
+    # Fast path: startup has already converted all files — just copy them
+    if _DEMO_PROCESSED_DIR.exists() and any(_DEMO_PROCESSED_DIR.glob("*.md")):
+        background_tasks.add_task(
+            _run_demo_load_from_cache,
+            job_id,
+            x_session_id,
+            session_dir,
+            current_usage,
+        )
+        return {"job_id": job_id, "status": "processing"}
+
+    # Slow path: processed cache not ready yet — convert from zip
     strip_before_h1 = False
     footer_cutoff = ""
 
@@ -1365,7 +1781,6 @@ async def load_demo_files(
             except Exception:
                 pass
     else:
-        # Cache not ready — fall back to fetching directly from B2
         try:
             async with httpx.AsyncClient() as client:
                 auth = await _b2_authorize(client)
@@ -1393,135 +1808,32 @@ async def load_demo_files(
                 status_code=502, detail="Failed to load demo files from storage"
             )
 
-    try:
-        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
-    except zipfile.BadZipFile:
-        raise HTTPException(
-            status_code=502, detail="Demo archive is not a valid zip file"
-        )
-
-    saved_files = []
-    rejected_files = []
-    total_new_size = 0
-
-    for entry in zf.infolist():
-        if entry.is_dir():
-            continue
-
-        file_name = entry.filename
-        if _is_ignored_path(file_name):
-            continue
-
-        # Flatten path separators the same way as folder uploads
-        parts = [p for p in file_name.replace("\\", "/").split("/") if p]
-        joined = "-".join(parts) if len(parts) > 1 else file_name
-        safe_filename = sanitize_filename(joined)
-        if not safe_filename:
-            rejected_files.append({"name": file_name, "reason": "Invalid filename"})
-            continue
-
-        content = zf.read(entry)
-
-        if len(content) > MAX_FILE_SIZE:
-            rejected_files.append(
-                {"name": file_name, "reason": "File exceeds the 50MB size limit"}
-            )
-            continue
-
-        if current_usage + total_new_size + len(content) > MAX_STORAGE_PER_SESSION:
-            raise HTTPException(
-                status_code=507,
-                detail=f"Storage quota exceeded. Maximum {MAX_STORAGE_PER_SESSION // 1024 // 1024}MB per session",
-            )
-
-        # Detect MIME type (same logic as /api/upload)
-        kind = filetype.guess(content)
-        if kind is not None:
-            mime_type = kind.mime
-        else:
-            guessed_mime, _ = mimetypes.guess_type(file_name)
-            if guessed_mime is None:
-                rejected_files.append(
-                    {"name": file_name, "reason": "File type not recognised"}
-                )
-                continue
-            mime_type = guessed_mime
-
-        if mime_type not in ALLOWED_MIME_TYPES:
-            rejected_files.append(
-                {"name": file_name, "reason": "File type not supported"}
-            )
-            continue
-
-        temp_path = session_dir / f"temp_{secrets.token_hex(8)}_{safe_filename}"
-        try:
-            async with aiofiles.open(temp_path, "wb") as f:
-                await f.write(content)
-
-            result = md_converter.convert(str(temp_path))
-            markdown_content = result.text_content
-            markdown_content = markdown_content.replace(" ", " ")
-
-            if not markdown_content or not markdown_content.strip():
-                raise ValueError("Conversion produced empty content")
-
-            if mime_type == "text/html":
-                if strip_before_h1:
-                    markdown_content = _strip_before_first_h1(markdown_content)
-                if footer_cutoff:
-                    markdown_content = _strip_after_last_occurrence(
-                        markdown_content, footer_cutoff
-                    )
-
-            if not markdown_content or not markdown_content.strip():
-                rejected_files.append(
-                    {
-                        "name": file_name,
-                        "reason": "Processing options removed all content",
-                    }
-                )
-                continue
-
-            md_filename = safe_filename + ".md"
-            md_path = session_dir / md_filename
-
-            async with aiofiles.open(md_path, "w", encoding="utf-8") as f:
-                await f.write(markdown_content)
-
-            metadata: dict = {}
-            if mime_type == "text/html":
-                og_url = _extract_og_url(content)
-                if og_url:
-                    metadata["url"] = og_url
-            meta_path = session_dir / (md_filename + ".metadata")
-            async with aiofiles.open(meta_path, "w", encoding="utf-8") as f:
-                await f.write(json.dumps(metadata))
-
-            file_size = md_path.stat().st_size
-            total_new_size += file_size
-            saved_files.append({"name": md_filename, "size": file_size})
-
-        except HTTPException:
-            raise
-        except Exception as e:
-            rejected_files.append(
-                {"name": file_name, "reason": f"Processing failed: {type(e).__name__}"}
-            )
-        finally:
-            if temp_path.exists():
-                temp_path.unlink()
-
-    logger.info(
-        f"Demo load complete | Session: {x_session_id[:8]}... | "
-        f"Loaded: {len(saved_files)} | Rejected: {len(rejected_files)}"
+    background_tasks.add_task(
+        _run_demo_load,
+        job_id,
+        x_session_id,
+        session_dir,
+        zip_bytes,
+        strip_before_h1,
+        footer_cutoff,
+        current_usage,
     )
-    return {
-        "file_count": len(saved_files),
-        "files": saved_files,
-        "rejected_files": rejected_files,
-        "storage_used": current_usage + total_new_size,
-        "storage_limit": MAX_STORAGE_PER_SESSION,
-    }
+
+    return {"job_id": job_id, "status": "processing"}
+
+
+@app.get("/api/demo/status/{job_id}")
+async def demo_load_status(
+    request: Request,
+    job_id: str,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+):
+    """Poll the status of a demo load job started by /api/demo/load."""
+    validate_session(x_session_id, request)
+    job = _demo_jobs.get(job_id)
+    if job is None or job.get("_session_id") != x_session_id:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {k: v for k, v in job.items() if not k.startswith("_")}
 
 
 # ---------------------------------------------------------------------------
