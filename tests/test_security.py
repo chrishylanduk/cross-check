@@ -1,6 +1,8 @@
 """Security tests for authentication and authorisation logic."""
 
 import hashlib
+import os
+import time
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -204,7 +206,7 @@ class TestAuthMiddlewareClerkMode:
 class TestAuthMiddlewarePasswordMode:
     def _password_patches(self, token_in_set=False):
         token = "testtoken_abc123"
-        valid_tokens = {token} if token_in_set else set()
+        valid_tokens = {token: time.time()} if token_in_set else {}
         return token, [
             patch.object(main_module, "CLERK_ENABLED", False),
             patch.object(main_module, "PROTOTYPE_PASSWORD_ENABLED", True),
@@ -259,8 +261,10 @@ class TestAuthMiddlewarePasswordMode:
         # /api/auth/validate must be reachable without an auth token (it IS the auth endpoint).
         # Use a correct password so the handler returns 200, proving middleware let it through.
         password = "correctpassword"  # pragma: allowlist secret
-        pw_hash = hashlib.sha256(password.encode()).hexdigest()
+        salt = os.urandom(32)
+        pw_hash = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1)
         _, patches = self._password_patches()
+        patches.append(patch.object(main_module, "_SCRYPT_SALT", salt))
         patches.append(patch.object(main_module, "PROTOTYPE_PASSWORD_HASH", pw_hash))
         for p in patches:
             p.start()
@@ -279,10 +283,12 @@ class TestAuthMiddlewarePasswordMode:
 
 class TestPasswordValidationEndpoint:
     def _patches(self, password="correctpassword"):  # pragma: allowlist secret
-        pw_hash = hashlib.sha256(password.encode()).hexdigest()
+        salt = os.urandom(32)
+        pw_hash = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1)
         return [
             patch.object(main_module, "CLERK_ENABLED", False),
             patch.object(main_module, "PROTOTYPE_PASSWORD_ENABLED", True),
+            patch.object(main_module, "_SCRYPT_SALT", salt),
             patch.object(main_module, "PROTOTYPE_PASSWORD_HASH", pw_hash),
         ]
 

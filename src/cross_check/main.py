@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import hashlib
+import hmac
 import httpx
 import io
 import json
@@ -107,14 +108,17 @@ elif PROTOTYPE_PASSWORD_ENABLED:
         logger.error("PROTOTYPE_PASSWORD must be more than 6 characters")
         sys.exit(1)
 
-# Hash used only for password verification — never exposed externally
-PROTOTYPE_PASSWORD_HASH = (
-    hashlib.sha256(PROTOTYPE_PASSWORD.encode()).hexdigest()
+# Hash used only for password verification — never exposed externally.
+# Salt is random per process start; scrypt is slow by design to resist brute-force.
+_SCRYPT_SALT: bytes = os.urandom(32)
+PROTOTYPE_PASSWORD_HASH: bytes | None = (
+    hashlib.scrypt(PROTOTYPE_PASSWORD.encode(), salt=_SCRYPT_SALT, n=16384, r=8, p=1)
     if PROTOTYPE_PASSWORD
     else None
 )
-# Random tokens issued on successful auth — separate from the password hash
-VALID_AUTH_TOKENS: set[str] = set()
+# Random tokens issued on successful auth — stored with their issue time for expiry.
+AUTH_TOKEN_TTL = 86400  # 24 hours, matching session lifetime
+VALID_AUTH_TOKENS: dict[str, float] = {}
 
 # ---------------------------------------------------------------------------
 # Clerk JWT verification
@@ -363,7 +367,8 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
 
     auth_token = request.headers.get("X-Prototype-Auth")
-    if auth_token and auth_token in VALID_AUTH_TOKENS:
+    issued_at = VALID_AUTH_TOKENS.get(auth_token) if auth_token else None
+    if issued_at and time.time() - issued_at < AUTH_TOKEN_TTL:
         return await call_next(request)
 
     return JSONResponse(
@@ -426,6 +431,19 @@ async def session_cleanup_loop():
             cleanup_session_files(sid)
         if expired:
             logger.info(f"Cleanup loop: evicted {len(expired)} expired session(s)")
+
+        # Remove expired prototype auth tokens
+        expired_tokens = [
+            t
+            for t, issued_at in list(VALID_AUTH_TOKENS.items())
+            if now - issued_at >= AUTH_TOKEN_TTL
+        ]
+        for t in expired_tokens:
+            VALID_AUTH_TOKENS.pop(t, None)
+        if expired_tokens:
+            logger.info(
+                f"Cleanup loop: evicted {len(expired_tokens)} expired auth token(s)"
+            )
 
         # Remove analysis jobs older than 24 hours
         expired_jobs = [
@@ -791,16 +809,18 @@ async def validate_password(
     if not PROTOTYPE_PASSWORD_ENABLED:
         return {"valid": True, "token": None, "message": "Password protection disabled"}  # nosec B105
 
-    # Hash the provided password
-    provided_hash = hashlib.sha256(password_request.password.encode()).hexdigest()
+    provided_hash = hashlib.scrypt(
+        password_request.password.encode(), salt=_SCRYPT_SALT, n=16384, r=8, p=1
+    )
 
-    # Check if it matches
-    if provided_hash == PROTOTYPE_PASSWORD_HASH:
+    if PROTOTYPE_PASSWORD_HASH is not None and hmac.compare_digest(
+        provided_hash, PROTOTYPE_PASSWORD_HASH
+    ):
         logger.info(
             f"Successful prototype password validation from {get_remote_address(request)}"
         )
         auth_token = secrets.token_urlsafe(32)
-        VALID_AUTH_TOKENS.add(auth_token)
+        VALID_AUTH_TOKENS[auth_token] = time.time()
         return {
             "valid": True,
             "token": auth_token,
