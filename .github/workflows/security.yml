@@ -47,8 +47,8 @@ jobs:
         run: bandit -c pyproject.toml -r src/ --severity-level medium
 
   # ── Python dependency audit ────────────────────────────────────────────────
-  pip-audit:
-    name: pip-audit (dependency vulnerabilities)
+  uv-audit:
+    name: uv audit (dependency vulnerabilities)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -61,11 +61,8 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Run pip-audit
-        run: |
-          pip install pip-audit
-          uv export --no-dev --no-emit-project --format requirements-txt > /tmp/requirements.txt
-          pip-audit -r /tmp/requirements.txt
+      - name: Run uv audit
+        run: uv audit --no-dev --locked
 
   # ── Frontend dependency audit ──────────────────────────────────────────────
   npm-audit:
