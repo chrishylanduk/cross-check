@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    # Applies to routine version updates only; security fixes are not delayed.
+    cooldown:
+      default-days: 7
+    # Disable routine version updates while allowing security update PRs.
+    open-pull-requests-limit: 0
+    groups:
+      security:
+        applies-to: security-updates
+        patterns:
+          - "*"
