@@ -14,3 +14,17 @@ updates:
         applies-to: security-updates
         patterns:
           - "*"
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 1
+    # Include transitive dependencies such as urllib3 and virtualenv.
+    allow:
+      - dependency-type: all
+    groups:
+      python-dependencies:
+        patterns:
+          - "*"
